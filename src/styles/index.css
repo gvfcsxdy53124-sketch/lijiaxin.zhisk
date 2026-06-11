@@ -1,0 +1,142 @@
+@import "tailwindcss";
+
+/* 全局优化样式 */
+:root {
+  --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  --success-gradient: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+  --info-gradient: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+}
+
+/* 滚动条优化 */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #cbd5e1, #94a3b8);
+  border-radius: 10px;
+  transition: all 0.3s;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #94a3b8, #64748b);
+}
+
+/* 卡片悬停效果增强 */
+.card-hover {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.card-hover:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+}
+
+/* 按钮点击效果 */
+.btn-press:active {
+  transform: scale(0.95);
+}
+
+/* 渐变文字 */
+.gradient-text {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.semantic-keyword-range {
+  --semantic-weight: 70%;
+  width: 100%;
+  height: 28px;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.semantic-keyword-range::-webkit-slider-runnable-track {
+  height: 7px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    #0ea5e9 0%,
+    #0ea5e9 var(--semantic-weight),
+    #14b8a6 var(--semantic-weight),
+    #14b8a6 100%
+  );
+}
+
+.semantic-keyword-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 32px;
+  margin-top: -12.5px;
+  border: 1px solid #dbe3ed;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 3px 9px rgb(15 23 42 / 0.22);
+}
+
+.semantic-keyword-range::-moz-range-track {
+  height: 7px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    #0ea5e9 0%,
+    #0ea5e9 var(--semantic-weight),
+    #14b8a6 var(--semantic-weight),
+    #14b8a6 100%
+  );
+}
+
+.semantic-keyword-range::-moz-range-thumb {
+  width: 18px;
+  height: 32px;
+  border: 1px solid #dbe3ed;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 3px 9px rgb(15 23 42 / 0.22);
+}
+
+/* 动画 */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* 固定分页符样式 */
+.fixed-pagination {
+  position: sticky;
+  bottom: 0;
+  background: linear-gradient(to top, white 80%, transparent);
+  padding-top: 2rem;
+  padding-bottom: 1.5rem;
+  z-index: 10;
+  backdrop-filter: blur(8px);
+}
