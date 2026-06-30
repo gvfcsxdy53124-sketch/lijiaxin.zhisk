@@ -6,5 +6,5 @@ interface AppProvidersProps {
 }
 
 export function AppProviders({children}: AppProvidersProps) {
-  return <BrowserRouter>{children}</BrowserRouter>;
+  return <BrowserRouter basename={import.meta.env.BASE_URL}>{children}</BrowserRouter>;
 }
