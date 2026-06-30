@@ -62,9 +62,37 @@ import {
   Divide,
   Eye,
   RotateCcw,
-  Lock
+  Lock,
+  AlertTriangle,
+  Pause,
+  Play,
+  RotateCw,
+  LogOut
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import {
+  DEFAULT_AUTH_PASSWORD,
+  PASSWORD_RULE_TEXT,
+  clearAuthSession,
+  getUserPassword,
+  isValidSixDigitPassword,
+  removeAuthUser,
+  setUserPassword,
+  upsertAuthUser
+} from '@/features/auth/authStorage';
+import {
+  analyzeKnowledgeImage,
+  getImageChunkTypeLabel,
+  inferImageFileKind,
+  isSemanticImageChunk,
+  type ImageAnalysisResult,
+  type ImageKnowledgeChunk
+} from '@/features/legacy/services/imageSliceAdapter';
+import { recognizeImageText, type ImageOcrResult } from '@/features/legacy/services/imageOcrAdapter';
+import { recognizeImageVisualContent, type ImageVisionLabel, type ImageVisionResult } from '@/features/legacy/services/imageVisionAdapter';
+import { transcribeAudioFile, type AudioTranscriptSegment, type AudioTranscriptionResult } from '@/features/legacy/services/audioTranscriptionAdapter';
+import { readUploadDocumentText } from '@/features/legacy/services/documentTextAdapter';
+import {SkillCenterPage} from '@/features/skills/pages/SkillCenterPage';
 
 // Types
 interface KnowledgeBase {
@@ -103,6 +131,38 @@ interface Document {
   enabled: boolean;
   fileId?: string; // 新增：文件ID
   summary?: string; // 新增：概述
+  sourceType?: 'text' | 'table' | 'web' | 'image' | 'audio';
+  previewUrl?: string;
+  content?: string;
+  chunks?: Array<{
+    id: string;
+    content: string;
+    type?: string;
+    sourceImage?: string;
+    chunkType?: string;
+    bbox?: { x: number; y: number; width: number; height: number };
+    rowIndex?: number;
+    colIndex?: number;
+    parentId?: string;
+    referenceId?: string;
+    tableMarkdown?: string;
+    metadata?: Record<string, string | number | boolean>;
+  }>;
+  sliceRule?: string;
+  ocrStatus?: ImageOcrResult['status'];
+  ocrText?: string;
+  ocrConfidence?: number;
+  ocrMessage?: string;
+  imageVisionStatus?: ImageVisionResult['status'];
+  imageVisionLabels?: ImageVisionLabel[];
+  imageVisionCaption?: string;
+  imageVisionMessage?: string;
+  imageVisionProvider?: ImageVisionResult['provider'];
+  asrStatus?: AudioTranscriptionResult['status'];
+  asrText?: string;
+  asrSegments?: AudioTranscriptSegment[];
+  asrMessage?: string;
+  asrProvider?: AudioTranscriptionResult['provider'];
 }
 
 type AppModule = 'knowledge' | 'skill' | 'permission';
@@ -154,6 +214,8 @@ interface PermissionDepartment {
 }
 
 type DocumentStatus = Document['status'];
+
+const MAX_AUTO_FILE_TAGS = 3;
 
 const getDemoDocumentStatus = (index: number): DocumentStatus => {
   const statuses: DocumentStatus[] = ['Queued', 'Parsing', 'Chunking', 'Embedding', 'Ready', 'Failed', 'Disabled'];
@@ -1005,7 +1067,7 @@ const INITIAL_PERMISSION_ROLES: PermissionRole[] = [
     userCount: 3,
     createdAt: '2026-01-01',
     permissions: {
-      知识库管理: ['查看', '新增', '编辑', '删除', '上传文件', '配置权限', '角色管理']
+      知识库管理: ['知识库', 'Skill中心', '权限管理']
     }
   },
   {
@@ -1016,7 +1078,7 @@ const INITIAL_PERMISSION_ROLES: PermissionRole[] = [
     userCount: 12,
     createdAt: '2026-01-01',
     permissions: {
-      知识库管理: ['查看', '新增', '编辑', '删除', '上传文件', '配置权限']
+      知识库管理: ['知识库', 'Skill中心']
     }
   },
   {
@@ -1027,7 +1089,7 @@ const INITIAL_PERMISSION_ROLES: PermissionRole[] = [
     userCount: 86,
     createdAt: '2026-01-01',
     permissions: {
-      知识库管理: ['查看', '新增', '编辑（对自己创建的内容）']
+      知识库管理: ['知识库']
     }
   },
   {
@@ -1038,7 +1100,7 @@ const INITIAL_PERMISSION_ROLES: PermissionRole[] = [
     userCount: 24,
     createdAt: '2026-01-01',
     permissions: {
-      知识库管理: ['查看']
+      知识库管理: ['知识库']
     }
   },
   {
@@ -1049,7 +1111,7 @@ const INITIAL_PERMISSION_ROLES: PermissionRole[] = [
     userCount: 8,
     createdAt: '2026-05-18',
     permissions: {
-      知识库管理: ['仅见授权知识库列表', '管理部门知识库', '查看/搜索文档（部门范围）', '上传新文档（部门范围）']
+      知识库管理: ['知识库']
     }
   }
 ];
@@ -1087,10 +1149,19 @@ const INITIAL_PERMISSION_DEPARTMENTS: PermissionDepartment[] = [
 
 const getRoleKnowledgePermissions = (role: PermissionRole): string[] => {
   const preset = INITIAL_PERMISSION_ROLES.find(item => item.name === role.name);
-  return preset?.permissions['知识库管理'] || role.permissions['知识库管理'] || [];
+  return role.permissions['知识库管理'] || preset?.permissions['知识库管理'] || [];
 };
 
-const ROLE_PERMISSION_OPTIONS = ['查看', '新增', '编辑', '删除', '上传文件', '配置权限', '角色管理'];
+const ROLE_PERMISSION_GROUPS = [
+  { label: '知识库', pages: ['知识库列表页', '知识库详情页'] },
+  { label: 'Skill中心', pages: ['Skill模板库', 'Skill执行记录'] },
+  { label: '权限管理', pages: ['用户管理', '角色管理', '部门管理'] }
+] as const;
+const ROLE_PERMISSION_OPTIONS = ROLE_PERMISSION_GROUPS.map(group => group.label);
+const SKILL_NAV_ITEMS = [
+  { key: 'templates', label: 'Skill 模板库', path: '/skills/templates' },
+  { key: 'executions', label: 'Skill 执行记录', path: '/skills/executions' }
+] as const;
 const UNCONFIGURED_DEPARTMENT = '未配置';
 
 const isUnconfiguredDepartment = (department: string) =>
@@ -1101,18 +1172,189 @@ const getDepartmentDisplayName = (department: string) =>
 
 const getRolePermissionOptionState = (role: PermissionRole): Record<string, boolean> => {
   const permissions = getRoleKnowledgePermissions(role);
-  const has = (...patterns: string[]) => permissions.some(permission => patterns.some(pattern => permission.includes(pattern)));
 
-  return {
-    查看: has('查看'),
-    新增: has('新增'),
-    编辑: has('编辑'),
-    删除: has('删除'),
-    配置权限: has('配置权限'),
-    角色管理: has('角色管理'),
-    上传文件: has('上传文件')
-  };
+  return ROLE_PERMISSION_GROUPS.reduce<Record<string, boolean>>((state, group) => {
+    state[group.label] = permissions.includes(group.label) || group.pages.some(page => permissions.includes(page));
+    return state;
+  }, {});
 };
+
+const hasPageLevelPermissions = (permissions: string[]) =>
+  ROLE_PERMISSION_GROUPS.some(group => group.pages.some(page => permissions.includes(page)));
+
+function RolePermissionGroupCard({
+  group,
+  state,
+  readOnly,
+  onToggleParent,
+  onTogglePage
+}: {
+  group: typeof ROLE_PERMISSION_GROUPS[number];
+  state: { parent: boolean; pages: Record<string, boolean> };
+  readOnly: boolean;
+  onToggleParent: () => void;
+  onTogglePage: (page: string) => void;
+}) {
+  const parentCheckboxRef = useRef<HTMLInputElement>(null);
+  const selectedPageCount = group.pages.filter(page => state.pages[page]).length;
+  const allPagesSelected = selectedPageCount === group.pages.length;
+  const partiallySelected = selectedPageCount > 0 && !allPagesSelected && !state.parent;
+  const parentChecked = state.parent || allPagesSelected;
+
+  useEffect(() => {
+    if (parentCheckboxRef.current) {
+      parentCheckboxRef.current.indeterminate = partiallySelected;
+    }
+  }, [partiallySelected]);
+
+  return (
+    <details
+      defaultOpen={parentChecked || partiallySelected}
+      className="group overflow-hidden rounded-xl border border-slate-200 bg-white"
+    >
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 bg-slate-50 px-4 py-3 transition-all hover:bg-blue-50/50 [&::-webkit-details-marker]:hidden">
+        <div className="flex min-w-0 items-center gap-3">
+          <input
+            ref={parentCheckboxRef}
+            type="checkbox"
+            checked={parentChecked}
+            disabled={readOnly}
+            onClick={(event) => event.stopPropagation()}
+            onChange={onToggleParent}
+            className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-80"
+          />
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-slate-900">{group.label}</div>
+            <div className="mt-0.5 text-xs text-slate-500">包含 {group.pages.length} 个页面权限</div>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center">
+          <ChevronDown className="h-4 w-4 text-slate-400 transition-transform group-open:rotate-180" />
+        </div>
+      </summary>
+      <div className="border-t border-slate-100 px-4 py-3">
+        <div className="mb-2 text-xs font-semibold text-slate-500">页面权限</div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {group.pages.map((page) => (
+            <label
+              key={page}
+              className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 ${
+                state.parent ? 'bg-blue-50/60' : 'bg-slate-50'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={Boolean(state.pages[page])}
+                disabled={readOnly || state.parent}
+                onChange={() => onTogglePage(page)}
+                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-80"
+              />
+              {page}
+            </label>
+          ))}
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function RolePermissionMatrix({
+  role,
+  readOnly = false,
+  defaultKnowledge = false
+}: {
+  role?: PermissionRole;
+  readOnly?: boolean;
+  defaultKnowledge?: boolean;
+}) {
+  const permissions = role ? getRoleKnowledgePermissions(role) : [];
+  const hasExplicitPages = hasPageLevelPermissions(permissions);
+  const buildInitialState = () =>
+    ROLE_PERMISSION_GROUPS.reduce<Record<string, { parent: boolean; pages: Record<string, boolean> }>>((acc, group) => {
+      const parentChecked = role
+        ? permissions.includes(group.label)
+        : defaultKnowledge && group.label === '知识库';
+      acc[group.label] = {
+        parent: parentChecked,
+        pages: Object.fromEntries(group.pages.map(page => [
+          page,
+          parentChecked || (role ? permissions.includes(page) || (!hasExplicitPages && permissions.includes(group.label)) : defaultKnowledge && group.label === '知识库')
+        ]))
+      };
+      return acc;
+    }, {});
+  const [permissionState, setPermissionState] = useState(buildInitialState);
+
+  useEffect(() => {
+    setPermissionState(buildInitialState());
+  }, [role?.id, readOnly, defaultKnowledge]);
+
+  const toggleParent = (group: typeof ROLE_PERMISSION_GROUPS[number]) => {
+    if (readOnly) return;
+    setPermissionState(prev => {
+      const current = prev[group.label];
+      const selectedPageCount = group.pages.filter(page => current.pages[page]).length;
+      const allSelected = selectedPageCount === group.pages.length;
+      const shouldSelectAll = !(current.parent || allSelected);
+      return {
+        ...prev,
+        [group.label]: {
+          parent: shouldSelectAll,
+          pages: Object.fromEntries(group.pages.map(page => [page, shouldSelectAll]))
+        }
+      };
+    });
+  };
+
+  const togglePage = (group: typeof ROLE_PERMISSION_GROUPS[number], page: string) => {
+    if (readOnly) return;
+    setPermissionState(prev => {
+      const current = prev[group.label];
+      if (current.parent) return prev;
+      const pages = {...current.pages, [page]: !current.pages[page]};
+      const allSelected = group.pages.every(item => pages[item]);
+      return {
+        ...prev,
+        [group.label]: {
+          parent: allSelected,
+          pages
+        }
+      };
+    });
+  };
+
+  const selectedPermissions = ROLE_PERMISSION_GROUPS.flatMap((group) => {
+    const state = permissionState[group.label];
+    if (!state) return [];
+    return [
+      ...(state.parent ? [group.label] : []),
+      ...group.pages.filter(page => state.pages[page])
+    ];
+  });
+
+  return (
+    <div className="rounded-xl border border-slate-200 p-4">
+      <div className="mb-3 text-sm font-semibold text-slate-900">
+        权限 <span className="text-red-500">*</span>
+      </div>
+      {selectedPermissions.map(permission => (
+        <input key={permission} type="hidden" name="knowledgePermissions" value={permission} />
+      ))}
+      <div className="space-y-3">
+        {ROLE_PERMISSION_GROUPS.map((group) => (
+          <RolePermissionGroupCard
+            key={group.label}
+            group={group}
+            state={permissionState[group.label]}
+            readOnly={readOnly}
+            onToggleParent={() => toggleParent(group)}
+            onTogglePage={(page) => togglePage(group, page)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const location = useLocation();
@@ -1124,9 +1366,10 @@ export default function App() {
   };
 
   const [activeModule, setActiveModule] = useState<AppModule>(() => getModuleFromPath(location.pathname));
+  const activeSkillPage = SKILL_NAV_ITEMS.find(item => location.pathname.startsWith(item.path)) || SKILL_NAV_ITEMS[0];
   const switchModule = (module: AppModule) => {
     setActiveModule(module);
-    navigate(module === 'knowledge' ? '/knowledge' : module === 'skill' ? '/skills' : '/permissions');
+    navigate(module === 'knowledge' ? '/knowledge' : module === 'skill' ? '/skills/templates' : '/permissions');
   };
 
   useEffect(() => {
@@ -1171,7 +1414,7 @@ export default function App() {
   const [permissionDepartments, setPermissionDepartments] = useState<PermissionDepartment[]>(INITIAL_PERMISSION_DEPARTMENTS);
   const [selectedPermissionUserIds, setSelectedPermissionUserIds] = useState<string[]>([]);
   const [isPermissionBatchMode, setIsPermissionBatchMode] = useState(false);
-  const [showPermissionBatchMenu, setShowPermissionBatchMenu] = useState(false);
+  const [showPermissionBatchDeleteConfirm, setShowPermissionBatchDeleteConfirm] = useState(false);
   const [expandedDepartmentIds, setExpandedDepartmentIds] = useState<string[]>(['D-001', 'D-002']);
   const [selectedDepartmentId, setSelectedDepartmentId] = useState('D-001');
   const [searchQuery, setSearchQuery] = useState('');
@@ -1219,7 +1462,17 @@ export default function App() {
   const [teamPermissions, setTeamPermissions] = useState<TeamPermission[]>([]);
   const [rolePermissions, setRolePermissions] = useState<RolePermission[]>([]);
   const [selectedMembers, setSelectedMembers] = useState<{id: string, name: string, permission: 'view' | 'edit' | 'manage'}[]>([]); // 添加 'manage'
-  const [selectedPermissionTab, setSelectedPermissionTab] = useState<'team' | 'member'>('team'); // 当前选中的权限配置标签
+  const [selectedPermissionTab, setSelectedPermissionTab] = useState<'member' | 'role' | 'team'>('team'); // 当前选中的权限配置标签
+  const [partialCandidateSearch, setPartialCandidateSearch] = useState('');
+  const [partialBulkPermission, setPartialBulkPermission] = useState<'view' | 'edit' | 'manage'>('view');
+  const [pendingPartialDepartmentIds, setPendingPartialDepartmentIds] = useState<string[]>([]);
+  const [pendingPartialRoleIds, setPendingPartialRoleIds] = useState<string[]>([]);
+  const [partialSelectedSearch, setPartialSelectedSearch] = useState('');
+  const [partialSelectedDepartmentFilter, setPartialSelectedDepartmentFilter] = useState('all');
+  const [partialSelectedRoleFilter, setPartialSelectedRoleFilter] = useState('all');
+  const [partialSelectedPermissionFilter, setPartialSelectedPermissionFilter] = useState<'all' | 'view' | 'edit' | 'manage'>('all');
+  const [selectedPartialMemberIds, setSelectedPartialMemberIds] = useState<string[]>([]);
+  const [partialMemberConfigFilter, setPartialMemberConfigFilter] = useState<'unconfigured' | 'configured'>('unconfigured');
   const [expandedTeamId, setExpandedTeamId] = useState<string | null>(null); // 展开的团队ID
   const [expandedManageTeamId, setExpandedManageTeamId] = useState<string | null>(null); // 团队管理模态框中展开的团队ID
   const [expandedRoleId, setExpandedRoleId] = useState<string | null>(null); // 展开的角色ID
@@ -1327,6 +1580,51 @@ export default function App() {
     });
     return acc;
   }, [] as {id: string, name: string, avatar: string}[]);
+
+  const permissionRank = { view: 1, edit: 2, manage: 3 } as const;
+  const permissionText = { view: '只读', edit: '编辑', manage: '管理' } as const;
+  const permissionTone = {
+    view: 'bg-slate-100 text-slate-600',
+    edit: 'bg-blue-50 text-blue-700',
+    manage: 'bg-purple-50 text-purple-700'
+  } as const;
+
+  const resolvePartialAccessMembers = () => {
+    const memberMap = new Map<string, {
+      id: string;
+      name: string;
+      permission: 'view' | 'edit' | 'manage';
+      sources: string[];
+    }>();
+
+    const addMember = (member: { id: string; name: string }, permission: 'view' | 'edit' | 'manage', source: string) => {
+      const current = memberMap.get(member.id);
+      if (!current) {
+        memberMap.set(member.id, { id: member.id, name: member.name, permission, sources: [source] });
+        return;
+      }
+      current.sources = Array.from(new Set([...current.sources, source]));
+      if (permissionRank[permission] > permissionRank[current.permission]) {
+        current.permission = permission;
+      }
+    };
+
+    teamPermissions.forEach((team) => {
+      team.members
+        .filter((member) => !team.excludedMembers.includes(member.id))
+        .forEach((member) => addMember(member, team.memberPermissions[member.id] || team.permission, `部门：${team.teamName}`));
+    });
+
+    rolePermissions.forEach((role) => {
+      role.members
+        .filter((member) => !role.excludedMembers.includes(member.id))
+        .forEach((member) => addMember(member, role.memberPermissions[member.id] || role.permission, `角色：${role.roleName}`));
+    });
+
+    selectedMembers.forEach((member) => addMember(member, member.permission, '个人授权'));
+
+    return Array.from(memberMap.values()).sort((a, b) => permissionRank[b.permission] - permissionRank[a.permission]);
+  };
   
   const [newKBConfig, setNewKBConfig] = useState({
     // 步骤一：基础信息
@@ -1378,16 +1676,22 @@ export default function App() {
   const [showTagsDropdown, setShowTagsDropdown] = useState(false); // 控制标签筛选下拉菜单
   const [pendingSelectedTags, setPendingSelectedTags] = useState<string[]>([]); // 标签下拉菜单中的临时选择，点击确定后才生效
   const [selectedDocument, setSelectedDocument] = useState<Document | null>(null); // 选中的文档（用于详情页）
+  const [showDocumentChunks, setShowDocumentChunks] = useState(false);
   const [activeDocumentChunkId, setActiveDocumentChunkId] = useState(1);
   const [expandedDocumentChunkIds, setExpandedDocumentChunkIds] = useState<number[]>([]);
   const [chunkSearchQuery, setChunkSearchQuery] = useState('');
   const [chunkStatusFilter, setChunkStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [chunkEnabledMap, setChunkEnabledMap] = useState<Record<number, boolean>>({});
+  const [activeImageChunkId, setActiveImageChunkId] = useState<string | null>(null);
     const [showChunkEditModal, setShowChunkEditModal] = useState(false);
     const [editingChunkId, setEditingChunkId] = useState<number | null>(null);
     const [editingChunkText, setEditingChunkText] = useState('');
-    const [chunkEdits, setChunkEdits] = useState<Record<number, string>>({});
+  const [chunkEdits, setChunkEdits] = useState<Record<number, string>>({});
   const originalTextScrollRef = useRef<HTMLDivElement>(null);
+  const audioPreviewRef = useRef<HTMLAudioElement>(null);
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(472);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
 
   // 切片变换时，左侧原文对照自动滚动到对应高亮区域
   useEffect(() => {
@@ -1397,6 +1701,11 @@ export default function App() {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }, [activeDocumentChunkId]);
+  useEffect(() => {
+    setAudioCurrentTime(0);
+    setIsAudioPlaying(false);
+    setActiveImageChunkId(null);
+  }, [selectedDocument?.id]);
   const [docCurrentPage, setDocCurrentPage] = useState(1);
   const [docItemsPerPage, setDocItemsPerPage] = useState(10);
   const [selectedDocs, setSelectedDocs] = useState<string[]>([]);
@@ -1485,29 +1794,120 @@ export default function App() {
   ]); // 已添加的团队
   const [showFileUploadPage, setShowFileUploadPage] = useState(false); // 文件上传页面
   const [showFileUploadExitModal, setShowFileUploadExitModal] = useState(false); // 文件上传退出确认弹窗
-  const [uploadDataSource, setUploadDataSource] = useState<'local' | 'website' | 'api'>('local'); // 数据源类型
-  const [uploadingFiles, setUploadingFiles] = useState<Array<{id: string, name: string, size: number, progress: number, status: 'uploading' | 'success' | 'error'}>>([]); 
+  const [uploadingFiles, setUploadingFiles] = useState<Array<{
+    rawFile?: File;
+    id: string;
+    name: string;
+    size: number;
+    progress: number;
+    status: 'uploading' | 'success' | 'error';
+    sourceType?: 'text' | 'table' | 'web' | 'image' | 'audio';
+    content?: string;
+    sourceUrl?: string;
+    previewUrl?: string;
+    parseNote?: string;
+    problemReason?: string;
+    ocrStatus?: ImageOcrResult['status'];
+    ocrText?: string;
+    ocrConfidence?: number;
+    ocrMessage?: string;
+    imageVisionStatus?: ImageVisionResult['status'];
+    imageVisionLabels?: ImageVisionLabel[];
+    imageVisionCaption?: string;
+    imageVisionMessage?: string;
+    imageVisionProvider?: ImageVisionResult['provider'];
+    asrStatus?: AudioTranscriptionResult['status'];
+    asrText?: string;
+    asrSegments?: AudioTranscriptSegment[];
+    asrMessage?: string;
+    asrProvider?: AudioTranscriptionResult['provider'];
+  }>>([]);
   const [fileUploadStep, setFileUploadStep] = useState(1); // 文件上传步骤
-  const [fileUploadFileType, setFileUploadFileType] = useState<'text' | 'table' | 'web' | 'image' | 'audio' | 'api'>('text'); // 文件类型选择
+  const [fileUploadFileType, setFileUploadFileType] = useState<'text' | 'table' | 'web' | 'image' | 'audio'>('text'); // 文件类型选择
   const [fileUploadListPage, setFileUploadListPage] = useState(1); // 文件列表分页
   const [fileUploadShowProblems, setFileUploadShowProblems] = useState(false); // 只显示问题文件
   const [webUploadUrl, setWebUploadUrl] = useState('');
-  const [webAddedUrls, setWebAddedUrls] = useState<Array<{ id: string; url: string }>>([]);
+  const [webAddedUrls, setWebAddedUrls] = useState<Array<{ id: string; url: string; status: 'fetching' | 'success' | 'fallback' | 'error'; title?: string; content?: string }>>([]);
   const [webEnableHtmlFilter, setWebEnableHtmlFilter] = useState(false);
   const [webHtmlSelector, setWebHtmlSelector] = useState('');
   const [webExtractLinks, setWebExtractLinks] = useState(true);
-  const [apiConnectionForm, setApiConnectionForm] = useState({
-    name: '',
-    endpoint: '',
-    token: '',
-    authType: 'Bearer',
-    method: 'GET',
-    groupField: '',
-    timeout: '30'
+  const [step2SliceMethod, setStep2SliceMethod] = useState<'smart' | 'title' | 'record' | 'page'>('smart'); // 切片方法
+  const [step2SmartConfig, setStep2SmartConfig] = useState({
+    segmentDelimiterPreset: 'blankLine',
+    segmentDelimiter: '\\n\\n',
+    maxLength: 1000,
+    overlap: 80,
+    shortMergeThreshold: 150,
+    keepTitlePath: true,
+    longContentStrategy: '按段落/句子继续拆分'
   });
-  const [step2Separator, setStep2Separator] = useState('\\n\\n'); // 分段标识符
-  const [step2MaxLength, setStep2MaxLength] = useState(1024); // 分段最大长度
-  const [step2Overlap, setStep2Overlap] = useState(50); // 分段重叠长度
+  const [step2TitleConfig, setStep2TitleConfig] = useState({
+    titleDepth: '二级',
+    keepParentTitle: true,
+    maxLength: 1500,
+    overlap: 100,
+    longBlockStrategy: '按段落继续拆分',
+    shortBlockStrategy: '合并到上级标题'
+  });
+  const [step2RecordConfig, setStep2RecordConfig] = useState({
+    detectionMode: '自动识别',
+    recordUnit: '自动识别',
+    questionField: '问题 / 标题 / Query',
+    answerField: '答案 / 内容 / Answer',
+    metadataFields: '分类、标签、来源、更新时间',
+    maxLength: 1200,
+    overlap: 20,
+    longAnswerStrategy: '按段落继续拆分',
+    keepFieldNames: true
+  });
+  const [step2PageConfig, setStep2PageConfig] = useState({
+    pageUnit: '每页一块',
+    mergeAcrossPages: false,
+    keepPageNumber: true,
+    removeHeaderFooter: true,
+    ocrMode: '自动',
+    layoutOrderRecognition: true,
+    pageMaxLength: 1500,
+    pageOverlap: 100,
+    crossPageOverlap: 50
+  });
+  const [step2TableParseConfig, setStep2TableParseConfig] = useState({
+    parseMode: 'row',
+    fileTypeRecognition: '自动识别',
+    headerDetection: 'specified',
+    headerRow: 1,
+    skipEmptyRows: true,
+    keepEmptyRows: false,
+    conversionMode: 'natural',
+    descriptionTemplate: '{表头1}为{值1}，{表头2}为{值2}',
+    descriptionFields: [
+      { header: '表头1', value: '值1' },
+      { header: '表头2', value: '值2' }
+    ],
+    mergeStrategy: 'primaryKey',
+    primaryKeyField: '员工ID',
+    questionColumn: '问题 / 标题 / Query',
+    answerColumn: '答案 / 内容 / Answer',
+    metadataColumns: '分类、标签、来源',
+    mergeEmptyCells: true
+  });
+  const [step2ImageQaConfig, setStep2ImageQaConfig] = useState({
+    parseMode: 'fullImage',
+    ocrLanguageMode: 'auto',
+    orientationCorrection: true
+  });
+  const [step2AudioParseConfig, setStep2AudioParseConfig] = useState({
+    parseMode: 'full',
+    languageMode: 'auto',
+    noiseReduction: true
+  });
+  const [step2WebParseConfig, setStep2WebParseConfig] = useState({
+    parseMode: 'main',
+    encodingDetection: 'auto',
+    removeScriptsAndStyles: true,
+    removeChrome: true,
+    keepPageTitle: true
+  });
   const [step2IndexMethod, setStep2IndexMethod] = useState<'向量检索' | '全文检索' | '混合检索'>('混合检索');
   const [step2IndexConfig, setStep2IndexConfig] = useState({
     vectorTopK: 3,
@@ -1522,10 +1922,1183 @@ export default function App() {
   const [step2PreviewFileIndex, setStep2PreviewFileIndex] = useState(0); // 预览文件索引
   const [step2PreviewChunks, setStep2PreviewChunks] = useState<Array<{id: string, content: string}>>([]);
   const [step2ShowPreview, setStep2ShowPreview] = useState(false);
+  const step2SliceMethodOptions = [
+    {
+      key: 'smart',
+      title: '智能切片',
+      subtitle: '自动识别结构',
+      helper: '普通文档默认用',
+      icon: Sparkles,
+      scene: '普通 Word、PDF、网页正文、产品手册、制度文件、通用文档。',
+      description: '系统自动识别标题、段落和句子边界，优先保证语义完整；超长内容再按长度补切。'
+    },
+    {
+      key: 'title',
+      title: '按标题切分',
+      subtitle: '保留目录层级',
+      helper: '结构化文档用',
+      icon: Type,
+      scene: '技术文档、API 文档、规章制度、白皮书、说明书、论文类文档。',
+      description: '按照文档标题层级切分，切片内容保持原文，不额外添加系统生成说明。'
+    },
+    {
+      key: 'record',
+      title: '按问答/记录切分',
+      subtitle: '一条知识一块',
+      helper: 'FAQ、表格、知识条目用',
+      icon: MessageSquare,
+      scene: 'FAQ、客服问答、表格型知识、产品问答、政策条目、知识库标准条目。',
+      description: '按问答对、表格行或知识条目切分，确保一条完整知识作为一个独立块，适合 FAQ 和结构化知识库。'
+    },
+    {
+      key: 'page',
+      title: '按页切分',
+      subtitle: '保留页码溯源',
+      helper: 'PDF、扫描件、合同、报告溯源用',
+      icon: FileStack,
+      scene: 'PDF、扫描件、合同、论文、报告、政策文件、需要精确页码溯源的资料。',
+      description: '按照页码边界切分，并保留页码来源，适合 PDF、扫描件、合同和需要精确溯源的报告类文档。'
+    }
+  ] as const;
+  const visibleStep2SliceMethodOptions = step2SliceMethodOptions.filter((method) => {
+    if (fileUploadFileType === 'text') return method.key === 'smart' || method.key === 'title';
+    if (fileUploadFileType === 'audio') return method.key !== 'title';
+    if (fileUploadFileType === 'web') return method.key !== 'page';
+    return true;
+  });
+  const selectedStep2SliceMethod =
+    visibleStep2SliceMethodOptions.find((method) => method.key === step2SliceMethod) || visibleStep2SliceMethodOptions[0];
+  useEffect(() => {
+    if (!visibleStep2SliceMethodOptions.some(method => method.key === step2SliceMethod)) {
+      setStep2SliceMethod(visibleStep2SliceMethodOptions[0]?.key || 'smart');
+    }
+  }, [fileUploadFileType, step2SliceMethod, visibleStep2SliceMethodOptions]);
+  const step2UploadTypeOptions = {
+    text: { title: '导入文本文档', desc: '文档内容切片入库', icon: FileText, tone: 'blue' },
+    table: { title: '导入表格型知识', desc: '按表格行和字段解析为知识条目', icon: Layout, tone: 'emerald' },
+    image: { title: '导入图片文件', desc: '按图片问答或 OCR 内容入库', icon: Image, tone: 'orange' },
+    audio: { title: '导入音频文件', desc: '音频转写后按文本切片入库', icon: Video, tone: 'pink' },
+    web: { title: '读取网页数据', desc: '抓取正文后按文本切片入库', icon: Globe, tone: 'violet' }
+  } as const;
+  const selectedStep2UploadType = step2UploadTypeOptions[fileUploadFileType];
+  const skipUploadRuleConfig = fileUploadFileType === 'image' || fileUploadFileType === 'audio';
+  const uploadStepItems = skipUploadRuleConfig
+    ? [
+        { num: 1, label: '上传文件' },
+        { num: 3, displayNum: 2, label: '文件处理' }
+      ]
+    : [
+        { num: 1, label: '上传文件' },
+        { num: 2, label: '规则配置' },
+        { num: 3, label: '文件处理' }
+      ];
+  const isStep2GenericSliceType = fileUploadFileType === 'text' || fileUploadFileType === 'audio' || fileUploadFileType === 'web';
+  const applyStep2SliceMethod = (methodKey: typeof step2SliceMethod) => {
+    const method = visibleStep2SliceMethodOptions.find((item) => item.key === methodKey) || visibleStep2SliceMethodOptions[0];
+    setStep2SliceMethod(method.key);
+    setStep2PreviewChunks([]);
+    setStep2ShowPreview(false);
+  };
+  const applyFileUploadType = (type: typeof fileUploadFileType) => {
+    if (type !== fileUploadFileType) {
+      setUploadingFiles([]);
+      setWebAddedUrls([]);
+      setFileUploadShowProblems(false);
+      setFileUploadListPage(1);
+    }
+    setFileUploadFileType(type);
+    setStep2PreviewChunks([]);
+    setStep2ShowPreview(false);
+    if ((type === 'image' || type === 'audio') && fileUploadStep === 2) {
+      setFileUploadStep(1);
+    }
+  };
+  const getStep2ChunkSummary = () => {
+    if (step2SliceMethod === 'title') {
+      return `${step2TitleConfig.titleDepth} / 最大 ${step2TitleConfig.maxLength} 字符 / 重叠 ${step2TitleConfig.overlap} 字符`;
+    }
+    if (step2SliceMethod === 'record') {
+      return `${step2RecordConfig.recordUnit} / 最大 ${step2RecordConfig.maxLength} 字符 / 重叠 ${step2RecordConfig.overlap} 字符`;
+    }
+    if (step2SliceMethod === 'page') {
+      return `${step2PageConfig.pageUnit} / ${step2PageConfig.keepPageNumber ? '保留页码' : '不保留页码'} / OCR ${step2PageConfig.ocrMode}`;
+    }
+    return `标识符 ${step2SmartConfig.segmentDelimiter || '\\n\\n'} / 最大 ${step2SmartConfig.maxLength} 字符 / 重叠 ${step2SmartConfig.overlap} 字符`;
+  };
+  const getStep3RuleSummary = () => {
+    if (fileUploadFileType === 'table') {
+      return {
+        label: '解析规则',
+        title: '表格内容解析',
+        desc: '基础解析 / 按表格行和字段生成知识条目'
+      };
+    }
+    if (fileUploadFileType === 'image') {
+      return {
+        label: '解析规则',
+        title: '图片 OCR 识别',
+        desc: ''
+      };
+    }
+    if (fileUploadFileType === 'audio') {
+      return {
+        label: '解析规则',
+        title: '音频解析（ASR）',
+        desc: ''
+      };
+    }
+    if (fileUploadFileType === 'web') {
+      return {
+        label: '网页切片',
+        title: selectedStep2SliceMethod.title,
+        desc: `${step2WebParseConfig.parseMode === 'main' ? '自动提取正文' : '提取全部文字'} / 自动编码识别 / ${getStep2ChunkSummary()}`
+      };
+    }
+    return {
+      label: '分段模式',
+      title: selectedStep2SliceMethod.title,
+      desc: getStep2ChunkSummary()
+    };
+  };
+  const resetStep2SliceConfig = () => {
+    if (step2SliceMethod === 'title') {
+      setStep2TitleConfig({
+        titleDepth: '二级',
+        keepParentTitle: true,
+        maxLength: 1500,
+        overlap: 100,
+        longBlockStrategy: '按段落继续拆分',
+        shortBlockStrategy: '合并到上级标题'
+      });
+    } else if (step2SliceMethod === 'record') {
+      setStep2RecordConfig({
+        detectionMode: '自动识别',
+        recordUnit: '自动识别',
+        questionField: '问题 / 标题 / Query',
+        answerField: '答案 / 内容 / Answer',
+        metadataFields: '分类、标签、来源、更新时间',
+        maxLength: 1200,
+        overlap: 20,
+        longAnswerStrategy: '按段落继续拆分',
+        keepFieldNames: true
+      });
+    } else if (step2SliceMethod === 'page') {
+      setStep2PageConfig({
+        pageUnit: '每页一块',
+        mergeAcrossPages: false,
+        keepPageNumber: true,
+        removeHeaderFooter: true,
+        ocrMode: '自动',
+        layoutOrderRecognition: true,
+        pageMaxLength: 1500,
+        pageOverlap: 100,
+        crossPageOverlap: 50
+      });
+    } else {
+      setStep2SmartConfig({
+        segmentDelimiterPreset: 'blankLine',
+        segmentDelimiter: '\\n\\n',
+        maxLength: 1000,
+        overlap: 80,
+        shortMergeThreshold: 150,
+        keepTitlePath: true,
+        longContentStrategy: '按段落/句子继续拆分'
+      });
+    }
+    setStep2ReplaceSpaces(true);
+    setStep2RemoveUrls(false);
+    setStep2PreviewChunks([]);
+    setStep2ShowPreview(false);
+  };
+  const renderConfigHelp = (text: string) => (
+    <span className="relative group inline-flex">
+      <span className="flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-300 text-[10px] font-semibold text-slate-400 transition-colors group-hover:border-blue-400 group-hover:text-blue-500">?</span>
+      <span className="pointer-events-none invisible absolute left-1/2 top-6 z-50 w-64 -translate-x-1/2 rounded-lg bg-slate-900 px-3 py-2 text-xs font-normal leading-5 text-white opacity-0 shadow-xl transition-all group-hover:visible group-hover:opacity-100">
+        {text}
+      </span>
+    </span>
+  );
+  const renderConfigLabel = (label: string, help?: string) => (
+    <div className="mb-2 flex h-5 items-center gap-1.5 text-xs font-medium text-slate-600">
+      <span>{label}</span>
+      {help && renderConfigHelp(help)}
+    </div>
+  );
+  const configInputClass = 'h-10 min-w-0 flex-1 bg-transparent px-3 text-sm text-slate-700 outline-none';
+  const configSelectClass = 'h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20';
+  const configFieldClass = 'rounded-xl border border-slate-200 bg-white px-3 py-3 transition focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-100';
+  const renderNumberField = (label: string, value: number, onChange: (value: number) => void, fallback: number, help?: string) => (
+    <div className={configFieldClass}>
+      {renderConfigLabel(label, help)}
+      <div className="flex h-10 overflow-hidden rounded-lg border border-slate-200 bg-slate-50 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/20">
+        <input type="number" value={value} onChange={(e) => onChange(parseInt(e.target.value) || fallback)} className={configInputClass} />
+        <span className="flex items-center border-l border-slate-200 bg-slate-50 px-2 text-xs text-slate-400">chars</span>
+      </div>
+    </div>
+  );
+  const renderSelectField = (label: string, value: string, onChange: (value: string) => void, options: string[], help?: string) => (
+    <div className={configFieldClass}>
+      {renderConfigLabel(label, help)}
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={configSelectClass}>
+        {options.map((option) => <option key={option} value={option}>{option}</option>)}
+      </select>
+    </div>
+  );
+  const renderDelimiterField = () => {
+    const delimiterOptions = [
+      { label: '空行', value: '\\n\\n' },
+      { label: '换行', value: '\\n' },
+      { label: '句号', value: '。' },
+      { label: '分号', value: '；' },
+      { label: '英文句号', value: '.' },
+      { label: '英文分号', value: ';' },
+      { label: 'Markdown 标题', value: '\\n## ' },
+      { label: '自定义', value: step2SmartConfig.segmentDelimiter }
+    ];
+    return (
+      <div className={configFieldClass}>
+        {renderConfigLabel('分段标识符', '系统会优先按照该标识符拆分文本，例如空行、换行、句号或自定义符号；拆分后的片段仍会受最大长度限制。')}
+        <div className="grid gap-2 md:grid-cols-[160px_1fr]">
+          <select
+            value={step2SmartConfig.segmentDelimiterPreset}
+            onChange={(e) => {
+              const preset = e.target.value;
+              const match = delimiterOptions.find(option => option.label === preset);
+              setStep2SmartConfig(prev => ({
+                ...prev,
+                segmentDelimiterPreset: preset,
+                segmentDelimiter: match?.value || prev.segmentDelimiter
+              }));
+            }}
+            className={configSelectClass}
+          >
+            {delimiterOptions.map((option) => <option key={option.label} value={option.label}>{option.label}</option>)}
+          </select>
+          <input
+            value={step2SmartConfig.segmentDelimiter}
+            onChange={(e) => setStep2SmartConfig(prev => ({ ...prev, segmentDelimiterPreset: '自定义', segmentDelimiter: e.target.value }))}
+            placeholder="输入分段标识符，如 \\n\\n、---、###"
+            className="h-10 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+          />
+        </div>
+      </div>
+    );
+  };
+  const renderSwitchField = (label: string, checked: boolean, onChange: (checked: boolean) => void, help?: string) => (
+    <button type="button" onClick={() => onChange(!checked)} className={`flex min-h-[68px] w-full items-center justify-between gap-3 rounded-xl border px-3 py-3 text-left text-sm transition-all ${
+      checked ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100 text-slate-900' : 'border-slate-200 bg-white text-slate-700 hover:border-blue-200'
+    }`}>
+      <span className="flex min-w-0 items-center gap-1.5 font-medium">
+        <span className="truncate">{label}</span>
+        {help && renderConfigHelp(help)}
+      </span>
+      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+        checked ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+      }`}>
+        {checked && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+      </span>
+    </button>
+  );
+  const renderRecommendedTitle = (title: string, recommended?: boolean) => (
+    <div className="flex flex-wrap items-center gap-2 text-sm font-semibold leading-5 text-slate-900">
+      <span>{title}</span>
+      {recommended && (
+        <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-semibold leading-none text-blue-700">推荐</span>
+      )}
+    </div>
+  );
+  const chunkWithOverlap = (text: string, maxLength: number, overlap: number) => {
+    const cleanText = text.trim();
+    if (!cleanText) return [];
+    const chunks: string[] = [];
+    let start = 0;
+    const safeMaxLength = Math.max(1, Math.floor(maxLength) || cleanText.length);
+    const safeOverlap = Math.min(Math.max(0, Math.floor(overlap) || 0), Math.max(0, safeMaxLength - 1));
+    while (start < cleanText.length) {
+      const end = Math.min(cleanText.length, start + safeMaxLength);
+      chunks.push(cleanText.slice(start, end).trim());
+      if (end >= cleanText.length) break;
+      start = Math.max(end - safeOverlap, start + 1);
+    }
+    return chunks.filter(Boolean);
+  };
+  const chunkSegmentsByLength = (segments: string[], maxLength: number, overlap: number) =>
+    segments.flatMap(segment => chunkWithOverlap(segment, maxLength, overlap));
+  const mergeShortSegments = (segments: string[], threshold: number) => {
+    const merged: string[] = [];
+    segments.forEach((segment) => {
+      const text = segment.trim();
+      if (!text) return;
+      const last = merged[merged.length - 1];
+      if (last && text.length < threshold) {
+        merged[merged.length - 1] = `${last}\n\n${text}`;
+      } else {
+        merged.push(text);
+      }
+    });
+    return merged;
+  };
+  const getWebPageTitle = (url: string) => {
+    try {
+      const parsed = new URL(url);
+      return parsed.hostname.replace(/^www\./, '') || '网页内容';
+    } catch {
+      return '网页内容';
+    }
+  };
+  const createFallbackWebContent = (url: string) => {
+    const title = getWebPageTitle(url);
+    return [
+      `# ${title}`,
+      `来源地址：${url}`,
+      '## 网页内容摘要',
+      '系统已为该网页生成可用于规则配置和切片预览的正文内容。由于浏览器跨域、网络权限或目标站点限制，当前环境可能无法直接读取完整网页正文。',
+      '## 解析结果',
+      '网页读取会先提取标题、正文段落、列表信息和关键链接，再进入规则配置步骤。后续可按智能切片或按问答/记录切分生成知识片段。',
+      '## 常见问题',
+      '问题：为什么某些网页无法直接抓取？',
+      '答案：部分站点会限制跨域请求、登录访问或搜索结果页抓取。系统会保留原始 URL，并生成兜底正文，确保可以继续配置切片和查看处理进度。',
+      '问题：网页内容如何进入知识库？',
+      '答案：网页正文会作为一个网页文件进入处理队列，后续按所选切片规则拆分成可检索片段。'
+    ].join('\n\n');
+  };
+  const extractTextFromHtml = (html: string, url: string) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    doc.querySelectorAll('script, style, noscript, svg, canvas, iframe').forEach(node => node.remove());
+    const title = doc.querySelector('title')?.textContent?.trim() || getWebPageTitle(url);
+    const selector = webEnableHtmlFilter && webHtmlSelector.trim() ? webHtmlSelector.trim() : '';
+    const root = selector ? doc.querySelector(selector) || doc.body : doc.body;
+    const text = (root?.textContent || '').replace(/\s+/g, ' ').trim();
+    const links = webExtractLinks
+      ? Array.from(doc.querySelectorAll('a[href]'))
+          .slice(0, 8)
+          .map((link) => `${link.textContent?.replace(/\s+/g, ' ').trim() || '链接'}：${(link as HTMLAnchorElement).href}`)
+          .filter(Boolean)
+      : [];
+    return [
+      `# ${title}`,
+      `来源地址：${url}`,
+      '## 网页正文',
+      text || createFallbackWebContent(url),
+      ...(links.length > 0 ? ['## 页面链接', ...links] : [])
+    ].join('\n\n');
+  };
+  const createWebFileFromUrl = async (url: string) => {
+    const id = `web-${Date.now()}`;
+    const title = getWebPageTitle(url);
+    const fileName = `${title}.html`;
+    const fallbackContent = createFallbackWebContent(url);
+    setWebAddedUrls([{ id, url, status: 'fetching', title, content: fallbackContent }]);
+    setUploadingFiles([{
+      id,
+      name: fileName,
+      size: fallbackContent.length,
+      progress: 35,
+      status: 'uploading',
+      sourceType: 'web',
+      content: fallbackContent,
+      sourceUrl: url
+    }]);
+    try {
+      const response = await fetch(url, { mode: 'cors' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const html = await response.text();
+      const content = extractTextFromHtml(html, url);
+      setWebAddedUrls([{ id, url, status: 'success', title, content }]);
+      setUploadingFiles([{
+        id,
+        name: fileName,
+        size: content.length,
+        progress: 100,
+        status: 'success',
+        sourceType: 'web',
+        content,
+        sourceUrl: url,
+        parseNote: '已读取网页正文，可按网页解析规则生成切片预览。'
+      }]);
+      const autoTags = generateFileUploadTags('web', [{ name: fileName, url, content }], fileUploadTagGenerationCount);
+      setAutoGeneratedFileTags(autoTags);
+      setFileUploadTags(prev => {
+        const manualTags = prev.filter(tag => !autoGeneratedFileTags.includes(tag));
+        return Array.from(new Set([...manualTags, ...autoTags]));
+      });
+      showToast('success', '网页内容已抓取');
+    } catch {
+      setWebAddedUrls([{ id, url, status: 'fallback', title, content: fallbackContent }]);
+      setUploadingFiles([{
+        id,
+        name: fileName,
+        size: fallbackContent.length,
+        progress: 100,
+        status: 'success',
+        sourceType: 'web',
+        content: fallbackContent,
+        sourceUrl: url,
+        parseNote: '当前环境无法直接读取网页，已生成兜底正文用于规则配置和切片预览。'
+      }]);
+      const autoTags = generateFileUploadTags('web', [{ name: fileName, url, content: fallbackContent }], fileUploadTagGenerationCount);
+      setAutoGeneratedFileTags(autoTags);
+      setFileUploadTags(prev => {
+        const manualTags = prev.filter(tag => !autoGeneratedFileTags.includes(tag));
+        return Array.from(new Set([...manualTags, ...autoTags]));
+      });
+      showToast('success', '链接已添加，已生成网页预览内容');
+    }
+  };
+  const getReadableFileContent = (file?: { name: string; content?: string }) => {
+    if (!file) return '';
+    if (file.content?.trim()) return file.content.trim();
+    return '';
+  };
+  const getFileExtension = (name?: string) => name?.split('.').pop()?.toLowerCase() || '';
+  const getFileUploadRules = (sourceType: typeof fileUploadFileType) => {
+    const rules = {
+      text: { extensions: ['doc', 'txt', 'docx', 'pdf', 'ppt', 'pptx', 'md'], maxSize: 100 * 1024 * 1024, label: '文档' },
+      table: { extensions: ['xlsx', 'xls', 'csv', 'json'], maxSize: 100 * 1024 * 1024, label: '表格' },
+      image: { extensions: ['png', 'jpg', 'jpeg', 'bmp'], maxSize: 50 * 1024 * 1024, label: '图片' },
+      audio: { extensions: ['wav', 'mp3', 'm4a', 'amr', 'mp4', 'mov', 'avi'], maxSize: 1024 * 1024 * 1024, label: '音视频' },
+      web: { extensions: ['html'], maxSize: 20 * 1024 * 1024, label: '网页' }
+    } as const;
+    return rules[sourceType];
+  };
+  const getFileSizeText = (bytes: number) => {
+    if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)}GB`;
+    if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)}MB`;
+    return `${Math.max(1, Math.round(bytes / 1024))}KB`;
+  };
+  const validateUploadFile = (file: File, sourceType: typeof fileUploadFileType, existingNames: string[], priorBatchNames: string[]) => {
+    const rules = getFileUploadRules(sourceType);
+    const ext = getFileExtension(file.name);
+    if (!rules.extensions.includes(ext as never)) {
+      return `文件格式不支持。当前上传方式仅支持 ${rules.extensions.map(item => `.${item}`).join(' / ')} 格式。`;
+    }
+    if (file.size <= 0) {
+      return '文件内容为空，无法生成解析预览或进入知识库处理。';
+    }
+    if (file.size > rules.maxSize) {
+      return `文件大小超过限制。${rules.label}文件单个大小不能超过 ${getFileSizeText(rules.maxSize)}。`;
+    }
+    const normalizedName = file.name.trim().toLowerCase();
+    if (existingNames.includes(normalizedName) || priorBatchNames.includes(normalizedName)) {
+      return '文件名重复。请移除重复文件后再继续处理。';
+    }
+    return '';
+  };
+  const canReadFileAsText = (fileName: string) => ['txt', 'md', 'csv', 'json'].includes(getFileExtension(fileName));
+  const normalizeCsvLine = (line: string) => {
+    const cells: string[] = [];
+    let current = '';
+    let quoted = false;
+    for (let index = 0; index < line.length; index += 1) {
+      const char = line[index];
+      const next = line[index + 1];
+      if (char === '"' && next === '"') {
+        current += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = !quoted;
+      } else if (char === ',' && !quoted) {
+        cells.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    cells.push(current.trim());
+    return cells.map(cell => cell.replace(/^"|"$/g, '').trim());
+  };
+  const parseTableRowsFromText = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return { headers: [] as string[], rows: [] as Record<string, string>[] };
+    try {
+      const parsed = JSON.parse(trimmed);
+      const items = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.data) ? parsed.data : [];
+      if (items.length > 0 && typeof items[0] === 'object') {
+        const headers = Array.from(new Set(items.flatMap((item: Record<string, unknown>) => Object.keys(item || {}))));
+        return {
+          headers,
+          rows: items.slice(0, 30).map((item: Record<string, unknown>) =>
+            Object.fromEntries(headers.map(header => [header, String(item?.[header] ?? '')]))
+          )
+        };
+      }
+    } catch {
+      // Not JSON, continue as CSV-like text.
+    }
+    const lines = trimmed.split(/\r?\n/).map(line => line.trim()).filter(line => step2TableParseConfig.keepEmptyRows || line);
+    const nonEmptyLines = step2TableParseConfig.skipEmptyRows ? lines.filter(Boolean) : lines;
+    const rawRows = nonEmptyLines.map(normalizeCsvLine).filter(row => row.some(Boolean));
+    if (rawRows.length === 0) return { headers: [] as string[], rows: [] as Record<string, string>[] };
+    const headerIndex = step2TableParseConfig.headerDetection === 'specified'
+      ? Math.max(0, Math.min(step2TableParseConfig.headerRow - 1, rawRows.length - 1))
+      : 0;
+    const headers = rawRows[headerIndex].map((cell, index) => cell || `字段${index + 1}`);
+    const dataRows = rawRows.slice(headerIndex + 1);
+    return {
+      headers,
+      rows: dataRows.slice(0, 30).map(row =>
+        Object.fromEntries(headers.map((header, index) => [header, row[index] || '']))
+      )
+    };
+  };
+  const buildTableRecordText = (row: Record<string, string>, headers: string[]) => {
+    const visibleHeaders = headers.filter(header => row[header]?.trim());
+    if (step2TableParseConfig.conversionMode === 'markdown') {
+      return [
+        `| ${visibleHeaders.join(' | ')} |`,
+        `| ${visibleHeaders.map(() => '---').join(' | ')} |`,
+        `| ${visibleHeaders.map(header => row[header]).join(' | ')} |`
+      ].join('\n');
+    }
+    const configuredFields = (step2TableParseConfig.descriptionFields || [])
+      .map(field => field.header?.trim())
+      .filter(Boolean);
+    const targetHeaders = configuredFields.length > 0
+      ? configuredFields.filter(header => headers.includes(header))
+      : visibleHeaders;
+    return (targetHeaders.length > 0 ? targetHeaders : visibleHeaders)
+      .map(header => `${header}为${row[header] || '-'}`)
+      .join('，');
+  };
+  const normalizeExtractedDocumentText = (text: string) =>
+    text
+      .replace(/\u0000/g, '')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  const decodeXmlEntities = (value: string) => {
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = value;
+    return textarea.value;
+  };
+  const decompressZipEntry = async (bytes: Uint8Array, method: number) => {
+    if (method === 0) return bytes;
+    if (method !== 8 || typeof DecompressionStream === 'undefined') {
+      throw new Error('Unsupported zip compression');
+    }
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  };
+  const readZipXmlEntries = async (file: File) => {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const view = new DataView(bytes.buffer);
+    const minEocdOffset = Math.max(0, bytes.length - 0xffff - 22);
+    let eocdOffset = -1;
+    for (let offset = bytes.length - 22; offset >= minEocdOffset; offset -= 1) {
+      if (view.getUint32(offset, true) === 0x06054b50) {
+        eocdOffset = offset;
+        break;
+      }
+    }
+    if (eocdOffset < 0) throw new Error('Invalid zip file');
+    const centralDirectoryOffset = view.getUint32(eocdOffset + 16, true);
+    const entryCount = view.getUint16(eocdOffset + 10, true);
+    const entries: Record<string, string> = {};
+    const decoder = new TextDecoder('utf-8');
+    let offset = centralDirectoryOffset;
+    for (let index = 0; index < entryCount; index += 1) {
+      if (view.getUint32(offset, true) !== 0x02014b50) break;
+      const method = view.getUint16(offset + 10, true);
+      const compressedSize = view.getUint32(offset + 20, true);
+      const nameLength = view.getUint16(offset + 28, true);
+      const extraLength = view.getUint16(offset + 30, true);
+      const commentLength = view.getUint16(offset + 32, true);
+      const localHeaderOffset = view.getUint32(offset + 42, true);
+      const name = decoder.decode(bytes.slice(offset + 46, offset + 46 + nameLength));
+      if (name.endsWith('.xml') && view.getUint32(localHeaderOffset, true) === 0x04034b50) {
+        const localNameLength = view.getUint16(localHeaderOffset + 26, true);
+        const localExtraLength = view.getUint16(localHeaderOffset + 28, true);
+        const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
+        const compressedBytes = bytes.slice(dataStart, dataStart + compressedSize);
+        const decompressed = await decompressZipEntry(compressedBytes, method);
+        entries[name] = decoder.decode(decompressed);
+      }
+      offset += 46 + nameLength + extraLength + commentLength;
+    }
+    return entries;
+  };
+  const getXmlElements = (root: Document | Element, tagName: string, localName: string) => {
+    const direct = Array.from(root.getElementsByTagName(tagName));
+    if (direct.length > 0) return direct;
+    return Array.from(root.getElementsByTagNameNS('*', localName));
+  };
+  const getXmlAttribute = (element: Element, localName: string) =>
+    element.getAttribute(`w:${localName}`) ||
+    element.getAttribute(localName) ||
+    element.getAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', localName) ||
+    '';
+  const extractDocxTextFromEntries = (entries: Record<string, string>) => {
+    const xml = entries['word/document.xml'];
+    if (!xml) return '';
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    const paragraphs = getXmlElements(doc, 'w:p', 'p');
+    return normalizeExtractedDocumentText(paragraphs.map((paragraph) => {
+      const text = getXmlElements(paragraph, 'w:t', 't')
+        .map(node => node.textContent || '')
+        .join('');
+      if (!text.trim()) return '';
+      const style = getXmlElements(paragraph, 'w:pStyle', 'pStyle')
+        .map(node => getXmlAttribute(node, 'val'))
+        .find(Boolean) || '';
+      const headingLevel = style.match(/(?:heading|标题)\s*([1-6])/i)?.[1];
+      return headingLevel ? `${'#'.repeat(Number(headingLevel))} ${text}` : text;
+    }).filter(Boolean).join('\n\n'));
+  };
+  const extractPptxTextFromEntries = (entries: Record<string, string>) => {
+    const slideNames = Object.keys(entries)
+      .filter(name => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+      .sort((a, b) => Number(a.match(/slide(\d+)\.xml/)?.[1] || 0) - Number(b.match(/slide(\d+)\.xml/)?.[1] || 0));
+    const slides = slideNames.map((name, index) => {
+      const doc = new DOMParser().parseFromString(entries[name], 'application/xml');
+      const text = getXmlElements(doc, 'a:t', 't')
+        .map(node => node.textContent?.trim() || '')
+        .filter(Boolean)
+        .join('\n');
+      return text ? `# 第 ${index + 1} 页\n\n${text}` : '';
+    }).filter(Boolean);
+    return normalizeExtractedDocumentText(slides.join('\n\n'));
+  };
+  const decodePdfLiteralString = (value: string) =>
+    decodeXmlEntities(value
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\n')
+      .replace(/\\t/g, '\t')
+      .replace(/\\\(/g, '(')
+      .replace(/\\\)/g, ')')
+      .replace(/\\\\/g, '\\'));
+  const extractPdfPlainText = async (file: File) => {
+    const raw = new TextDecoder('latin1').decode(await file.arrayBuffer());
+    const parts: string[] = [];
+    Array.from(raw.matchAll(/\(((?:\\.|[^\\)])*)\)\s*Tj/g)).forEach(match => {
+      parts.push(decodePdfLiteralString(match[1]));
+    });
+    Array.from(raw.matchAll(/\[((?:.|\n)*?)\]\s*TJ/g)).forEach(match => {
+      Array.from(match[1].matchAll(/\(((?:\\.|[^\\)])*)\)/g)).forEach(item => {
+        parts.push(decodePdfLiteralString(item[1]));
+      });
+    });
+    return normalizeExtractedDocumentText(parts.join(' ').replace(/\s{2,}/g, ' '));
+  };
+  const extractLegacyDocText = async (file: File) => {
+    const bytes = await file.arrayBuffer();
+    const decoders = ['utf-16le', 'gb18030', 'gbk', 'utf-8'];
+    const candidates = decoders.map((encoding) => {
+      try {
+        const decoded = new TextDecoder(encoding).decode(bytes);
+        const readable = decoded
+          .replace(/[^\u4e00-\u9fa5A-Za-z0-9\s，。！？；：、（）()《》【】\[\]_.\-/%@+]/g, '\n')
+          .split(/\n+/)
+          .map(line => line.replace(/\s+/g, ' ').trim())
+          .filter(line => line.length >= 2 && /[\u4e00-\u9fa5A-Za-z]/.test(line))
+          .filter(line => !/^[A-Za-z0-9_.\-/%@+\s]{2,12}$/.test(line))
+          .join('\n');
+        const chineseScore = (readable.match(/[\u4e00-\u9fa5]/g) || []).length;
+        const fieldScore = (readable.match(/[：:]/g) || []).length * 8;
+        return { text: normalizeExtractedDocumentText(readable), score: chineseScore + fieldScore };
+      } catch {
+        return { text: '', score: 0 };
+      }
+    });
+    const best = candidates.sort((a, b) => b.score - a.score)[0];
+    return best?.score > 20 ? best.text : '';
+  };
+  const readUploadFileContent = async (file: File) => {
+    try {
+      return await readUploadDocumentText(file);
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : '文件解析失败，无法生成真实原文和切片。');
+    }
+  };
+  const cleanPreviewText = (text: string) => {
+    let next = text;
+    if (step2ReplaceSpaces) next = next.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n');
+    if (step2RemoveUrls) next = next.replace(/https?:\/\/\S+/g, '').replace(/\S+@\S+\.\S+/g, '');
+    return next.trim();
+  };
+  const decodeDelimiter = (value: string) =>
+    value
+      .replace(/\\r/g, '\r')
+      .replace(/\\n/g, '\n')
+      .replace(/\\t/g, '\t');
+  const getReadableDelimiter = (value: string) =>
+    value
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+      .replace(/\t/g, '\\t');
+  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const splitTextWithDelimiter = (source: string, delimiter: string) => {
+    const normalizedDelimiter = delimiter || '\n\n';
+    if (normalizedDelimiter === '\n\n') {
+      return source.split(/\n\s*\n+/).map(item => item.trim()).filter(Boolean);
+    }
+    if (normalizedDelimiter === '\n') {
+      return source.split(/\n+/).map(item => item.trim()).filter(Boolean);
+    }
+    const shouldKeepDelimiter = !/^\s+$/.test(normalizedDelimiter);
+    const delimiterPattern = new RegExp(`(${escapeRegExp(normalizedDelimiter)}+)`, 'g');
+    const isDelimiterPart = new RegExp(`^${escapeRegExp(normalizedDelimiter)}+$`);
+    const parts = source.split(delimiterPattern);
+    const segments: string[] = [];
+    let current = '';
+    parts.forEach((part) => {
+      if (!part) return;
+      if (isDelimiterPart.test(part)) {
+        if (shouldKeepDelimiter) {
+          current += part;
+        }
+        if (current.trim()) segments.push(current.trim());
+        current = '';
+        return;
+      }
+      current += part;
+    });
+    if (current.trim()) segments.push(current.trim());
+    return segments;
+  };
+  const splitBySmartDelimiter = (source: string) => {
+    const delimiter = decodeDelimiter(step2SmartConfig.segmentDelimiter || '\\n\\n');
+    return splitTextWithDelimiter(source, delimiter);
+  };
+  const chunkSmartSegments = (segments: string[]) => {
+    const maxLength = Math.max(1, step2SmartConfig.maxLength || 1000);
+    const overlap = Math.max(0, step2SmartConfig.overlap || 0);
+    return segments.flatMap(segment => (
+      segment.length > maxLength
+        ? chunkWithOverlap(segment, maxLength, overlap)
+        : [segment]
+    )).filter(Boolean);
+  };
+  const getTitleDepthNumber = (depth: string) => (
+    depth === '一级' ? 1 : depth === '二级' ? 2 : depth === '三级' ? 3 : 6
+  );
+  const normalizeTitleLine = (line: string) => line.replace(/\s+/g, ' ').trim();
+  const getTitleLineInfo = (line: string) => {
+    const trimmed = normalizeTitleLine(line);
+    if (!trimmed || /^#\s*第\s*\d+\s*页$/.test(trimmed) || /^第\s*\d+\s*页$/.test(trimmed)) return null;
+    const markdownHeading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (markdownHeading) {
+      return { level: markdownHeading[1].length, title: markdownHeading[2].trim(), normalized: trimmed };
+    }
+    const numberedHeading = trimmed.match(/^((?:\d+|[一二三四五六七八九十]+)(?:[.、．]\d+){0,5}|第[一二三四五六七八九十\d]+[章节篇部分])[\s、.．-]+(.+)$/);
+    if (numberedHeading && numberedHeading[2]?.trim().length >= 2 && trimmed.length <= 80) {
+      const marker = numberedHeading[1];
+      const level = marker.startsWith('第') ? 1 : Math.min(6, marker.split(/[.．、]/).filter(Boolean).length);
+      return { level, title: numberedHeading[2].trim(), normalized: `${'#'.repeat(level)} ${trimmed}` };
+    }
+    return null;
+  };
+  const splitByTitleDepth = (source: string) => {
+    const maxDepth = getTitleDepthNumber(step2TitleConfig.titleDepth);
+    const lines = source.split(/\r?\n/).map(line => line.replace(/^---\s*第\s*\d+\s*页\s*---\s*$/, '').trimEnd());
+    const sections: string[] = [];
+    let current: string[] = [];
+    let hasMatchedHeading = false;
+    lines.forEach((line) => {
+      const heading = getTitleLineInfo(line);
+      if (heading && heading.level <= maxDepth) {
+        if (current.some(item => item.trim())) {
+          sections.push(current.join('\n').trim());
+        }
+        hasMatchedHeading = true;
+        current = [heading.normalized];
+      } else if (heading) {
+        current.push(heading.normalized);
+      } else {
+        current.push(line);
+      }
+    });
+    if (current.some(item => item.trim())) sections.push(current.join('\n').trim());
+    return hasMatchedHeading && sections.length > 0 ? sections : chunkWithOverlap(source, step2TitleConfig.maxLength, step2TitleConfig.overlap);
+  };
+  const isImageDocument = (doc?: Pick<Document, 'format' | 'sourceType'> | null) =>
+    doc?.sourceType === 'image' || ['PNG', 'JPG', 'JPEG', 'BMP'].includes(doc?.format?.toUpperCase?.() || '');
+  const isAudioDocument = (doc?: Pick<Document, 'format' | 'sourceType'> | null) =>
+    doc?.sourceType === 'audio' || ['MP3', 'WAV', 'M4A', 'AMR', 'MP4', 'MOV', 'AVI'].includes(doc?.format?.toUpperCase?.() || '');
+  const isStructuredImageName = (name: string) => inferImageFileKind(name) === 'structured';
+  const getImageAnalysisResult = (doc: Pick<Document, 'name' | 'previewUrl' | 'chunks' | 'ocrText' | 'ocrStatus' | 'imageVisionLabels' | 'imageVisionCaption' | 'imageVisionStatus'>): ImageAnalysisResult => {
+    const existingChunks = doc.chunks?.filter(chunk => chunk.chunkType || chunk.sourceImage) as ImageKnowledgeChunk[] | undefined;
+    if (existingChunks?.length && existingChunks.every(isSemanticImageChunk)) {
+      return {
+        imageType: existingChunks[0]?.metadata?.imageType === 'structured' ? 'structured' : 'unstructured',
+        sourceImage: existingChunks[0]?.sourceImage || doc.previewUrl || doc.name,
+        chunks: existingChunks
+      };
+    }
+    return analyzeKnowledgeImage({
+      name: doc.name,
+      previewUrl: doc.previewUrl,
+      ocrText: doc.ocrText,
+      ocrStatus: doc.ocrStatus,
+      visionLabels: doc.imageVisionLabels,
+      visionCaption: doc.imageVisionCaption,
+      visionStatus: doc.imageVisionStatus
+    });
+  };
+  const getImageAnalysisChunks = (doc: Pick<Document, 'name' | 'previewUrl' | 'chunks' | 'ocrText' | 'ocrStatus' | 'imageVisionLabels' | 'imageVisionCaption' | 'imageVisionStatus'>) =>
+    getImageAnalysisResult(doc).chunks;
+  const formatImageChunkContent = (chunk: NonNullable<Document['chunks']>[number]) => {
+    return [
+      chunk.title || getImageChunkTypeLabel(chunk.chunkType || chunk.type || ''),
+      chunk.content
+    ].filter(Boolean).join('\n');
+  };
+  const parseAudioTranscriptContent = (content?: string) => {
+    if (!content?.trim()) return [];
+    const matches = Array.from(content.matchAll(/(?:^|\n)(\d{1,2}:\d{2}(?::\d{2})?)\s*\n([\s\S]*?)(?=\n{2,}\d{1,2}:\d{2}(?::\d{2})?\s*\n|$)/g));
+    return matches
+      .map(match => ({
+        time: match[1],
+        text: match[2].trim()
+      }))
+      .filter(segment => segment.text);
+  };
+  const getAudioTranscriptSegments = (doc: Pick<Document, 'name' | 'chunks' | 'content' | 'asrSegments' | 'asrText'>) => {
+    if (doc.asrSegments?.length) {
+      return doc.asrSegments
+        .filter(segment => segment.text?.trim())
+        .sort((a, b) => getSecondsFromTimestamp(a.time) - getSecondsFromTimestamp(b.time));
+    }
+
+    const chunkSegments = (doc.chunks || [])
+      .filter(chunk => chunk.type === 'asr_segment' || chunk.metadata?.timestamp)
+      .map((chunk, index) => ({
+        time: String(chunk.metadata?.timestamp || formatPlaybackTime(index * 30)),
+        text: chunk.content
+      }))
+      .filter(segment => segment.text?.trim())
+      .sort((a, b) => getSecondsFromTimestamp(a.time) - getSecondsFromTimestamp(b.time));
+    if (chunkSegments.length > 0) return chunkSegments;
+
+    const contentSegments = parseAudioTranscriptContent(doc.asrText || doc.content);
+    if (contentSegments.length > 0) return contentSegments;
+
+    return [];
+  };
+  const isAudioUploadReady = (file: Pick<typeof uploadingFiles[number], 'name' | 'content' | 'asrText' | 'asrSegments' | 'asrStatus' | 'sourceType'>) => {
+    if (file.sourceType !== 'audio') return true;
+    return file.asrStatus === 'ready' && getAudioTranscriptSegments({
+      name: file.name,
+      content: file.content,
+      asrText: file.asrText,
+      asrSegments: file.asrSegments
+    }).length > 0;
+  };
+  const retryAudioTranscription = (fileId: string) => {
+    const target = uploadingFiles.find(file => file.id === fileId);
+    if (!target?.rawFile || target.sourceType !== 'audio') {
+      showToast('warning', '当前文件没有保留原始音视频，请重新上传后再转写');
+      return;
+    }
+
+    setUploadingFiles(prev => prev.map(file => file.id === fileId ? {
+      ...file,
+      progress: 8,
+      status: 'uploading' as const,
+      content: '',
+      parseNote: '正在重新进行音视频 ASR 转写...',
+      asrStatus: 'processing' as const,
+      asrMessage: '正在重新进行音视频 ASR 转写...',
+      asrText: '',
+      asrSegments: []
+    } : file));
+
+    void (async () => {
+      try {
+        const result = await transcribeAudioFile(target.rawFile, { languageMode: step2AudioParseConfig.languageMode });
+        const content = result.status === 'ready' && result.segments.length > 0
+          ? result.segments.map(segment => `${segment.time}\n${segment.text}`).join('\n\n')
+          : '';
+        setUploadingFiles(prev => prev.map(file => file.id === fileId ? {
+          ...file,
+          progress: 100,
+          status: 'success' as const,
+          content,
+          parseNote: result.message,
+          asrStatus: result.status,
+          asrText: result.text,
+          asrSegments: result.segments,
+          asrMessage: result.message,
+          asrProvider: result.provider
+        } : file));
+        if (result.status === 'ready' && result.segments.length > 0) {
+          showToast('success', `${target.name} 已重新完成 ASR 转写`);
+        } else {
+          showToast('warning', result.message || `${target.name} 暂未生成可用转写文本`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'ASR 转写失败，请稍后重试。';
+        setUploadingFiles(prev => prev.map(file => file.id === fileId ? {
+          ...file,
+          progress: 100,
+          status: 'success' as const,
+          content: '',
+          parseNote: message,
+          asrStatus: 'failed' as const,
+          asrText: '',
+          asrSegments: [],
+          asrMessage: message
+        } : file));
+        showToast('error', message);
+      }
+    })();
+  };
+  const getSecondsFromTimestamp = (timestamp: string) => {
+    const parts = timestamp.split(':').map(Number).filter(value => Number.isFinite(value));
+    if (parts.length >= 3) {
+      const [hours, minutes, seconds] = parts.slice(-3);
+      return (hours || 0) * 3600 + (minutes || 0) * 60 + (seconds || 0);
+    }
+    const [minutes, seconds] = parts;
+    return (minutes || 0) * 60 + (seconds || 0);
+  };
+  const formatPlaybackTime = (seconds: number) => {
+    const safeSeconds = Math.max(0, Math.floor(seconds || 0));
+    const hours = Math.floor(safeSeconds / 3600);
+    const minutes = Math.floor((safeSeconds % 3600) / 60);
+    const restSeconds = safeSeconds % 60;
+    if (hours > 0) {
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(restSeconds).padStart(2, '0')}`;
+    }
+    return `${String(minutes).padStart(2, '0')}:${String(restSeconds).padStart(2, '0')}`;
+  };
+  const buildStep2PreviewChunks = (file?: { name: string; content?: string }) => {
+    const source = cleanPreviewText(file?.content || '');
+    if (!source) return [];
+    if (step2SliceMethod === 'title') {
+      const sections = splitByTitleDepth(source);
+      return chunkSegmentsByLength(sections, step2TitleConfig.maxLength, step2TitleConfig.overlap);
+    }
+    if (step2SliceMethod === 'record') {
+      const qaPairs = Array.from(source.matchAll(/问题[:：]\s*([^\n]+)\n+答案[:：]\s*([\s\S]*?)(?=\n+问题[:：]|$)/g));
+      const records = qaPairs.length > 0
+        ? qaPairs.map(match => `${step2RecordConfig.keepFieldNames ? '问题：' : ''}${match[1].trim()}\n${step2RecordConfig.keepFieldNames ? '答案：' : ''}${match[2].trim()}`)
+        : source.split(/\n{2,}|(?=^\d+[.、]\s+)/gm).filter(item => item.trim());
+      return records.flatMap(record => chunkWithOverlap(record, step2RecordConfig.maxLength, step2RecordConfig.overlap));
+    }
+    if (step2SliceMethod === 'page') {
+      const pages = source.split(/---\s*第\s*\d+\s*页\s*---/).filter(item => item.trim());
+      const pageChunks = pages.length > 1 ? pages : chunkWithOverlap(source, step2PageConfig.pageMaxLength, step2PageConfig.pageOverlap);
+      return pageChunks.flatMap((page, index) => {
+        const prefix = step2PageConfig.keepPageNumber ? `来源：第 ${index + 1} 页\n` : '';
+        return chunkWithOverlap(`${prefix}${page.trim()}`, step2PageConfig.pageMaxLength, step2PageConfig.pageOverlap);
+      });
+    }
+    const segments = splitBySmartDelimiter(source);
+    return chunkSmartSegments(segments.length > 0 ? segments : [source]);
+  };
+  const getStep2SliceRuleText = () => {
+    if (fileUploadFileType === 'text') {
+      if (step2SliceMethod === 'title') {
+        return `按标题切分：${step2TitleConfig.titleDepth}标题 / 最大 ${step2TitleConfig.maxLength} 字符 / 重叠 ${step2TitleConfig.overlap} 字符`;
+      }
+      return `智能切片：标识符 ${getReadableDelimiter(decodeDelimiter(step2SmartConfig.segmentDelimiter || '\\n\\n'))} / 最大 ${step2SmartConfig.maxLength} 字符 / 重叠 ${step2SmartConfig.overlap} 字符`;
+    }
+    return `${selectedStep2SliceMethod.title}：${getStep2ChunkSummary()}`;
+  };
+  const buildStep2PreviewItems = (file?: { name: string; content?: string; sourceUrl?: string; parseNote?: string; size?: number; previewUrl?: string; ocrText?: string; ocrStatus?: ImageOcrResult['status']; imageVisionStatus?: ImageVisionResult['status']; imageVisionLabels?: ImageVisionLabel[]; imageVisionCaption?: string; asrStatus?: AudioTranscriptionResult['status']; asrText?: string; asrSegments?: AudioTranscriptSegment[]; asrMessage?: string }) => {
+    if (fileUploadFileType === 'web') {
+      const fileName = file?.name || file?.sourceUrl || '网页内容';
+      const cleanedContent = cleanPreviewText(file?.content || createFallbackWebContent(file?.sourceUrl || fileName));
+      const extractedText = buildStep2PreviewChunks({
+        name: fileName,
+        content: cleanedContent
+      });
+      return [
+        `来源网页：${fileName}\n解析方式：${step2WebParseConfig.parseMode === 'main' ? '自动提取正文' : '提取全部文字'}\n编码识别：自动识别\n${file?.parseNote || '网页正文已进入文本预处理流程。'}`,
+        `网页提取配置\n内容清洗：${step2WebParseConfig.removeScriptsAndStyles ? '移除脚本与样式代码' : '保留脚本与样式代码'}；${step2WebParseConfig.removeChrome ? '移除导航栏、页脚、侧边栏等非正文内容' : '保留页面外围内容'}\n保留信息：${step2WebParseConfig.keepPageTitle ? '页面标题' : '不保留页面标题'}`,
+        ...extractedText
+      ];
+    }
+    if (fileUploadFileType === 'audio') {
+      const fileName = file?.name || '音频文件.mp3';
+      const segments = getAudioTranscriptSegments({
+        name: fileName,
+        content: file?.content,
+        asrText: file?.asrText,
+        asrSegments: file?.asrSegments
+      });
+      if (segments.length > 0) {
+        return [
+          `来源音视频：${fileName}\n解析规则：浏览器端 ASR 自动转写\n处理结果：已生成时间戳文本，点击详情页文本可定位播放节点。`,
+          ...segments.map(segment => `${segment.time}\n${segment.text}`)
+        ];
+      }
+      return [
+        `来源音视频：${fileName}\n解析规则：ASR 自动转写`,
+        file?.asrStatus === 'processing'
+          ? 'ASR 正在转写中，完成后会显示真实时间戳文本。'
+          : file?.asrMessage || file?.parseNote || '暂未生成真实转写文本，请上传包含清晰人声的音视频文件，或配置后端 ASR 服务后重试。'
+      ];
+    }
+    if (isStep2GenericSliceType) {
+      return buildStep2PreviewChunks(file);
+    }
+    if (fileUploadFileType === 'table') {
+      const fileName = file?.name || '表格型知识.xlsx';
+      const parsedTable = parseTableRowsFromText(file?.content || '');
+      const parseRule = step2TableParseConfig.parseMode === 'whole'
+        ? '整表聚合'
+        : '逐行提取';
+      const headerRule = step2TableParseConfig.headerDetection === 'auto'
+        ? '自动识别首行'
+        : `指定第 ${step2TableParseConfig.headerRow} 行为表头`;
+      const templateRule = (step2TableParseConfig.descriptionFields || [])
+        .filter(item => item.header?.trim() || item.value?.trim())
+        .map(item => `${item.header || '表头'}为${item.value || '值'}`)
+        .join('，') || step2TableParseConfig.descriptionTemplate;
+      const conversionRule = step2TableParseConfig.conversionMode === 'markdown'
+        ? '保留原始表格结构'
+        : `转换为自然语言描述：${templateRule}`;
+      const mergeRule = step2TableParseConfig.mergeStrategy === 'primaryKey'
+        ? `按主键合并（${step2TableParseConfig.primaryKeyField || '未指定主键'}）`
+        : '每行独立';
+      const dataItems = parsedTable.rows.length > 0
+        ? parsedTable.rows.map(row => buildTableRecordText(row, parsedTable.headers)).filter(Boolean)
+        : [];
+      const records = step2TableParseConfig.parseMode === 'whole'
+        ? [`整表聚合结果\n${dataItems.join('\n')}`]
+        : dataItems;
+      const mergedRecords = step2TableParseConfig.mergeStrategy === 'primaryKey' && step2TableParseConfig.primaryKeyField
+        ? Object.entries(records.reduce<Record<string, string[]>>((acc, record, index) => {
+            const sourceRow = parsedTable.rows[index] || {};
+            const key = sourceRow[step2TableParseConfig.primaryKeyField] || `记录${index + 1}`;
+            acc[key] = [...(acc[key] || []), record];
+            return acc;
+          }, {})).map(([key, values]) => `${step2TableParseConfig.primaryKeyField}：${key}\n${values.join('\n')}`)
+        : records;
+      return [
+        `来源文件：${fileName}\n解析方式：${parseRule}\n表头识别：${headerRule}\n空行处理：${step2TableParseConfig.skipEmptyRows ? '自动跳过全空行' : '保留空行'}\n${file?.parseNote || '已按表格解析规则生成记录预览。'}`,
+        `结构化转换\n转换方式：${conversionRule}\n多行合并策略：${mergeRule}\n识别字段：${parsedTable.headers.join('、') || '待后端解析'}`,
+        ...mergedRecords.slice(0, 20)
+      ];
+    }
+    if (fileUploadFileType === 'image') {
+      const fileName = file?.name || '图片文件.png';
+      return getImageAnalysisChunks({
+        name: fileName,
+        previewUrl: file?.previewUrl,
+        ocrText: file?.ocrText || file?.content,
+        ocrStatus: file?.ocrStatus,
+        imageVisionLabels: file?.imageVisionLabels,
+        imageVisionCaption: file?.imageVisionCaption,
+        imageVisionStatus: file?.imageVisionStatus
+      })
+        .map(formatImageChunkContent);
+    }
+    return [];
+  };
+  const getCurrentStep2PreviewFile = () => {
+    const successFiles = uploadingFiles.filter(f => f.status === 'success');
+    return successFiles[step2PreviewFileIndex] || successFiles[0];
+  };
+  const createStep2PreviewEntries = (file?: { name: string; content?: string; sourceUrl?: string; parseNote?: string; size?: number; previewUrl?: string; ocrText?: string; ocrStatus?: ImageOcrResult['status']; imageVisionStatus?: ImageVisionResult['status']; imageVisionLabels?: ImageVisionLabel[]; imageVisionCaption?: string; asrStatus?: AudioTranscriptionResult['status']; asrText?: string; asrSegments?: AudioTranscriptSegment[]; asrMessage?: string }) => {
+    const prefix = fileUploadFileType === 'table'
+      ? 'table-preview'
+      : fileUploadFileType === 'image'
+        ? 'image-preview'
+        : 'chunk';
+    return buildStep2PreviewItems(file)
+      .slice(0, 20)
+      .map((content, index) => ({
+        id: `${prefix}-${index + 1}`,
+        content
+      }));
+  };
+  const refreshStep2Preview = (file = getCurrentStep2PreviewFile()) => {
+    const previewChunks = createStep2PreviewEntries(file);
+    setStep2PreviewChunks(previewChunks);
+    setStep2ShowPreview(true);
+  };
+  useEffect(() => {
+    if (fileUploadStep !== 2 || uploadingFiles.filter(file => file.status === 'success').length === 0) return;
+    refreshStep2Preview();
+  }, [fileUploadStep, step2PreviewFileIndex]);
+  useEffect(() => {
+    if (fileUploadStep !== 2 || !step2ShowPreview) return;
+    refreshStep2Preview();
+  }, [
+    fileUploadFileType,
+    step2SliceMethod,
+    step2SmartConfig,
+    step2TitleConfig,
+    step2RecordConfig,
+    step2PageConfig,
+    step2TableParseConfig,
+    step2ImageQaConfig,
+    step2AudioParseConfig,
+    step2WebParseConfig,
+    step2ReplaceSpaces,
+    step2RemoveUrls
+  ]);
+  const getStep2PreviewLabel = () => {
+    if (fileUploadFileType === 'table') return '解析预览';
+    if (fileUploadFileType === 'image') return '图片切片预览';
+    return '切片预览';
+  };
+  const getStep2PreviewEmptyText = () => {
+    if (fileUploadFileType === 'table') return '点击左侧的"生成预览"查看表格解析效果';
+    if (fileUploadFileType === 'image') return '上传图片后可查看 OCR 识别与图片切片预览';
+    return '点击左侧的"预览块"按钮来加载预览';
+  };
+  const generateFileUploadTags = (
+    sourceType: typeof fileUploadFileType,
+    sources: Array<{ name?: string; url?: string; content?: string }>,
+    variant = 0
+  ) => {
+    const text = sources
+      .map(source => `${source.name || ''} ${source.url || ''} ${source.content || ''}`)
+      .join(' ')
+      .toLowerCase();
+    const candidates: string[] = [];
+    const add = (tag: string) => {
+      if (!candidates.includes(tag)) candidates.push(tag);
+    };
+
+    const sourceTypeTags = {
+      text: ['文本文档', '文档资料', '知识资料'],
+      table: ['表格知识', '结构化数据', '业务数据'],
+      image: ['图片问答', '图片资料', 'OCR识别'],
+      audio: ['音频转写', '音频资料', '会议记录'],
+      web: ['网页资料', '网页正文', '外部资料']
+    } as const;
+    if (!text.trim()) {
+      sourceTypeTags[sourceType].forEach(add);
+    }
+
+    if (/\.(pdf|doc|docx|md|txt|ppt|pptx)\b/.test(text)) ['文档资料', '知识文档', '文件入库'].forEach(add);
+    if (/\.(xls|xlsx|csv|json)\b/.test(text)) ['结构化数据', '表格知识', '数据清单'].forEach(add);
+    if (/\.(png|jpg|jpeg|bmp)\b/.test(text)) ['图片资料', 'OCR识别', '视觉资料'].forEach(add);
+    if (/\.(mp3|wav|m4a|amr)\b/.test(text)) ['音频资料', '音频转写', '语音内容'].forEach(add);
+    if (/(api|接口|sdk|swagger|openapi)/i.test(text)) ['API文档', '接口资料', '技术文档'].forEach(add);
+    if (/(prd|需求|产品|手册|指南|说明|操作|使用)/i.test(text)) ['产品手册', '使用指南', '需求资料'].forEach(add);
+    if (/(培训|教程|课程|学习|lesson|training)/i.test(text)) ['培训材料', '学习资料', '课程内容'].forEach(add);
+    if (/(内部|制度|规范|流程|管理办法|政策|规章)/i.test(text)) ['内部资料', '制度流程', '规范文件'].forEach(add);
+    if (/(faq|问答|问题|客服|q&a)/i.test(text)) ['常见问题', '问答知识', '客服资料'].forEach(add);
+    if (/(技术|架构|方案|开发|代码|工程|前端|后端|数据库)/i.test(text)) ['技术文档', '技术方案', '工程资料'].forEach(add);
+
+    const fallbackTags = text.trim()
+      ? ['知识资料', '可检索资料', '业务知识', '知识条目', '共享资料']
+      : sourceTypeTags[sourceType];
+    fallbackTags.forEach(add);
+    const offset = candidates.length > 0 ? variant % candidates.length : 0;
+    return [...candidates.slice(offset), ...candidates.slice(0, offset)].slice(0, MAX_AUTO_FILE_TAGS);
+  };
   
   // 文件标签配置状态
   const [fileUploadTags, setFileUploadTags] = useState<string[]>([]);
+  const [autoGeneratedFileTags, setAutoGeneratedFileTags] = useState<string[]>([]);
+  const [fileUploadTagGenerationCount, setFileUploadTagGenerationCount] = useState(0);
   const [fileUploadTagInput, setFileUploadTagInput] = useState('');
+  useEffect(() => {
+    if (autoGeneratedFileTags.length <= MAX_AUTO_FILE_TAGS) return;
+    const trimmedAutoTags = autoGeneratedFileTags.slice(0, MAX_AUTO_FILE_TAGS);
+    setAutoGeneratedFileTags(trimmedAutoTags);
+    setFileUploadTags(prev => {
+      const manualTags = prev.filter(tag => !autoGeneratedFileTags.includes(tag));
+      return Array.from(new Set([...manualTags, ...trimmedAutoTags]));
+    });
+  }, [autoGeneratedFileTags]);
   
   // 文件解析配置状态
   const [fileParseConfig, setFileParseConfig] = useState({
@@ -1623,36 +3196,182 @@ export default function App() {
     }
   });
   // 文件上传处理函数
-  const handleFileUpload = (files: File[]) => {
-    const existingFileCount = uploadingFiles.length;
-    const newFiles = files.map((file, index) => ({
-      id: `file-${Date.now()}-${Math.random()}`,
+  const handleFileUpload = async (files: File[]) => {
+    const existingNames = uploadingFiles.map(file => file.name.trim().toLowerCase());
+    const seenBatchNames: string[] = [];
+    const pendingFiles = files.map((file, index) => {
+      const uploadOrder = uploadingFiles.length + index + 1;
+      const validationReason = validateUploadFile(file, fileUploadFileType, existingNames, seenBatchNames);
+      const demoProblemReason = uploadOrder === 3
+        ? '原型演示：第 3 个上传文件模拟为问题文件，用于展示异常原因的悬停查看效果。'
+        : '';
+      const problemReason = validationReason || demoProblemReason;
+      seenBatchNames.push(file.name.trim().toLowerCase());
+      return {
+        rawFile: file,
+        id: `file-${Date.now()}-${Math.random()}`,
+        name: file.name,
+        size: file.size,
+        progress: problemReason ? 0 : 0,
+        status: problemReason ? 'error' as const : 'uploading' as const,
+        sourceType: fileUploadFileType,
+        previewUrl: !problemReason && (fileUploadFileType === 'image' || fileUploadFileType === 'audio') ? URL.createObjectURL(file) : undefined,
+        problemReason,
+      parseNote: problemReason
+        ? problemReason
+        : fileUploadFileType === 'image'
+          ? '正在进行图片 OCR 与可见内容识别...'
+          : fileUploadFileType === 'audio'
+            ? '文件已上传，正在后台进行音视频 ASR 转写...'
+            : '正在读取文件内容...'
+      };
+    });
+    const newFiles = pendingFiles.map(file => ({
+      rawFile: file.rawFile,
+      id: file.id,
       name: file.name,
       size: file.size,
-      progress: 0,
-      status: 'uploading' as const,
-      shouldFail: existingFileCount + index === 1
+      progress: file.progress,
+      status: file.status,
+      sourceType: file.sourceType,
+      content: file.content,
+      previewUrl: file.previewUrl,
+      parseNote: file.parseNote,
+      problemReason: file.problemReason,
+      asrStatus: file.sourceType === 'audio' && file.status !== 'error' ? 'processing' as const : undefined,
+      asrMessage: file.sourceType === 'audio' && file.status !== 'error' ? '正在后台快速转写音视频内容...' : undefined,
+      imageVisionStatus: file.sourceType === 'image' && file.status !== 'error' ? 'empty' as const : undefined
     }));
     
     setUploadingFiles(prev => [...prev, ...newFiles]);
+    const tagSourceFiles = newFiles.filter(file => file.status !== 'error');
+    if (tagSourceFiles.length > 0) {
+      const autoTags = generateFileUploadTags(fileUploadFileType, tagSourceFiles.map(file => ({ name: file.name, content: file.content })), fileUploadTagGenerationCount);
+      setAutoGeneratedFileTags(autoTags);
+      setFileUploadTags(prev => {
+        const manualTags = prev.filter(tag => !autoGeneratedFileTags.includes(tag));
+        return Array.from(new Set([...manualTags, ...autoTags]));
+      });
+    }
     
-    // 模拟上传进度
-    newFiles.forEach((file) => {
-      let progress = 0;
+    pendingFiles.filter(file => file.status !== 'error').forEach((file) => {
+      let progress = 5;
       const interval = setInterval(() => {
-        progress += Math.random() * 30;
-        if (progress >= 100) {
-          progress = 100;
+        const cap = file.sourceType === 'audio' || file.sourceType === 'image' ? 92 : 98;
+        progress = Math.min(cap, progress + Math.random() * 18);
+        setUploadingFiles(prev =>
+          prev.map(f => f.id === file.id ? {
+            ...f,
+            progress: Math.floor(progress),
+            status: f.status
+          } : f)
+        );
+      }, 500);
+
+      void (async () => {
+        try {
+          const [ocrResult, imageVisionResult] = file.sourceType === 'image'
+            ? await Promise.all([
+                recognizeImageText(file.rawFile, step2ImageQaConfig.ocrLanguageMode),
+                recognizeImageVisualContent(file.rawFile)
+              ])
+            : [null, null] as const;
+          const asrResult = file.sourceType === 'audio'
+            ? await transcribeAudioFile(file.rawFile, { languageMode: step2AudioParseConfig.languageMode })
+            : null;
+          const readableContent = file.sourceType === 'image'
+            ? {
+                  content: ocrResult?.text || '',
+                  parseNote:
+                    [
+                      ocrResult?.status === 'ready'
+                        ? `OCR 已识别 ${ocrResult.text.length} 个字符${typeof ocrResult.confidence === 'number' ? `，置信度约 ${Math.round(ocrResult.confidence)}%` : ''}。`
+                        : ocrResult?.message || '未识别到清晰文字。',
+                      imageVisionResult?.status === 'ready'
+                        ? imageVisionResult.caption
+                          ? `图像理解已生成整图描述，并获得 ${imageVisionResult.labels.length} 个可见内容标签。`
+                          : `图像识别已获得 ${imageVisionResult.labels.length} 个可见内容标签。`
+                        : imageVisionResult?.message
+                    ].filter(Boolean).join(' ')
+                }
+            : file.sourceType === 'audio'
+              ? {
+                  content: asrResult?.status === 'ready' && asrResult.segments?.length
+                    ? asrResult.segments.map(segment => `${segment.time}\n${segment.text}`).join('\n\n')
+                    : '',
+                  parseNote:
+                    asrResult?.status === 'ready'
+                      ? asrResult.message || `ASR 已生成 ${asrResult.segments.length} 个时间片段。`
+                      : asrResult?.message || 'ASR 未生成真实转写文本，请检查音频清晰度或配置后端 ASR 服务。'
+              }
+              : await readUploadFileContent(file.rawFile);
+
           clearInterval(interval);
-          setUploadingFiles(prev => 
-            prev.map(f => f.id === file.id ? { ...f, progress: 100, status: file.shouldFail ? 'error' : 'success' } : f)
+          setUploadingFiles(prev =>
+            prev.map(f => f.id === file.id ? {
+              ...f,
+              ...readableContent,
+              progress: 100,
+              status: 'success',
+              ocrStatus: ocrResult?.status,
+              ocrText: ocrResult?.text,
+              ocrConfidence: ocrResult?.confidence,
+              ocrMessage: ocrResult?.message,
+              imageVisionStatus: imageVisionResult?.status,
+              imageVisionLabels: imageVisionResult?.labels,
+              imageVisionCaption: imageVisionResult?.caption,
+              imageVisionMessage: imageVisionResult?.message,
+              imageVisionProvider: imageVisionResult?.provider,
+              asrStatus: asrResult?.status,
+              asrText: asrResult?.text,
+              asrSegments: asrResult?.segments,
+              asrMessage: asrResult?.message,
+              asrProvider: asrResult?.provider
+            } : f)
           );
-        } else {
-          setUploadingFiles(prev => 
-            prev.map(f => f.id === file.id ? { ...f, progress: Math.floor(progress) } : f)
+        } catch (error) {
+          clearInterval(interval);
+          setUploadingFiles(prev =>
+            prev.map(f => {
+              if (f.id !== file.id) return f;
+              const message = error instanceof Error ? error.message : '文件解析失败，请重新上传。';
+              if (file.sourceType === 'image') {
+                return {
+                  ...f,
+                  progress: 100,
+                  status: 'success',
+                  parseNote: message,
+                  ocrStatus: 'failed' as const,
+                  ocrMessage: message,
+                  imageVisionStatus: 'failed' as const,
+                  imageVisionMessage: message
+                };
+              }
+              if (file.sourceType === 'audio') {
+                return {
+                  ...f,
+                  content: '',
+                  progress: 100,
+                  status: 'success',
+                  parseNote: message,
+                  asrStatus: 'failed' as const,
+                  asrMessage: message,
+                  asrSegments: [],
+                  asrText: ''
+                };
+              }
+              return {
+                ...f,
+                progress: 0,
+                status: 'error',
+                problemReason: message,
+                parseNote: message,
+                ...(file.sourceType === 'audio' ? { asrStatus: 'failed' as const, asrMessage: message } : {})
+              };
+            })
           );
         }
-      }, 500);
+      })();
     });
   };
 
@@ -1723,6 +3442,7 @@ export default function App() {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [dropdownOpenId, setDropdownOpenId] = useState<string | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isUserSettingsMenuOpen, setIsUserSettingsMenuOpen] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [deleteConfirmInput, setDeleteConfirmInput] = useState(''); // 删除确认输入框
   const [kbViewMode, setKbViewMode] = useState<'card' | 'list'>('card');
@@ -1908,9 +3628,10 @@ export default function App() {
       `字符数: ${doc.charCount}`,
       `标签: ${doc.tags.join(', ') || '无'}`,
       `更新时间: ${doc.lastEdited}`,
+      doc.sliceRule ? `切片规则: ${doc.sliceRule}` : '',
       '',
-      doc.summary || '当前为演示文件下载内容。实际接入后可替换为原始文件流。'
-    ].join('\n');
+      doc.content || doc.summary || '当前为演示文件下载内容。实际接入后可替换为原始文件流。'
+    ].filter(Boolean).join('\n');
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -2443,7 +4164,11 @@ export default function App() {
     setProcessingFileProgress({});
     setShowFileUploadPage(false);
     setUploadingFiles([]);
+    setWebUploadUrl('');
+    setWebAddedUrls([]);
     setFileUploadTags([]);
+    setAutoGeneratedFileTags([]);
+    setFileUploadTagGenerationCount(0);
     setFileUploadTagInput('');
     setFileUploadStep(1);
     setDocSearchQuery('');
@@ -2452,6 +4177,29 @@ export default function App() {
 
   const startFileImport = () => {
     const successFiles = uploadingFiles.filter(file => file.status === 'success');
+    const pendingAudioFiles = uploadingFiles.filter(file => file.sourceType === 'audio' && file.asrStatus === 'processing');
+    if (pendingAudioFiles.length > 0) {
+      showToast('info', `${pendingAudioFiles[0].name} 正在进行 ASR 转写，请完成后再入库`);
+      return;
+    }
+    const invalidAudioFiles = successFiles.filter(file => {
+      if (file.sourceType !== 'audio') return false;
+      return !isAudioUploadReady(file);
+    });
+    if (invalidAudioFiles.length > 0) {
+      showToast('warning', `${invalidAudioFiles[0].name} 暂未生成真实 ASR 转写内容：${invalidAudioFiles[0].asrMessage || '请配置后端 ASR 服务或重新上传更清晰的音视频'}`);
+      return;
+    }
+    const invalidFiles = successFiles.filter(file => {
+      if (file.sourceType === 'text' || file.sourceType === 'table') {
+        return !file.content?.trim();
+      }
+      return false;
+    });
+    if (invalidFiles.length > 0) {
+      showToast('warning', `${invalidFiles[0].name} 没有可入库的真实内容，请重新上传或更换文件格式`);
+      return;
+    }
     setFileUploadStep(3);
     setImportStatus('importing');
     setImportProgress({
@@ -2491,17 +4239,77 @@ export default function App() {
           window.clearInterval(timer);
           window.setTimeout(() => {
             if (selectedKB) {
-              const newDocs: Document[] = successFiles.map((file) => ({
-                id: file.id,
-                name: file.name,
-                tags: fileUploadTags,
-                charCount: Math.floor(Math.random() * 3000) + 500,
-                format: file.name.split('.').pop()?.toUpperCase() || 'FILE',
-                status: 'Ready' as const,
-                lastEdited: new Date().toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(/\//g, '-'),
-                addedBy: '海洋饼干',
-                enabled: true
-              }));
+              const newDocs: Document[] = successFiles.map((file) => {
+                const previewEntries = createStep2PreviewEntries(file);
+                const parsedText = previewEntries.map(entry => entry.content).join('\n\n');
+                const sourceType = file.sourceType || fileUploadFileType;
+                const sourceText = file.content || parsedText;
+                const imageAnalysis = sourceType === 'image'
+                  ? getImageAnalysisResult({
+                      name: file.name,
+                      previewUrl: file.previewUrl,
+                      ocrText: file.ocrText || file.content,
+                      ocrStatus: file.ocrStatus,
+                      imageVisionLabels: file.imageVisionLabels,
+                      imageVisionCaption: file.imageVisionCaption,
+                      imageVisionStatus: file.imageVisionStatus
+                    })
+                  : null;
+                const imageAnalysisChunks = imageAnalysis?.chunks || [];
+                const audioTranscriptSegments = sourceType === 'audio'
+                  ? getAudioTranscriptSegments({
+                      name: file.name,
+                      content: file.content,
+                      asrText: file.asrText,
+                      asrSegments: file.asrSegments
+                    })
+                  : [];
+                const audioTranscriptText = audioTranscriptSegments.map(segment => `${segment.time}\n${segment.text}`).join('\n\n');
+                return {
+                  id: file.id,
+                  name: file.name,
+                  tags: fileUploadTags,
+                  charCount: sourceType === 'audio' ? audioTranscriptText.length : sourceText.length,
+                  chunkCount: sourceType === 'audio' ? audioTranscriptSegments.length : previewEntries.length,
+                  format: file.name.split('.').pop()?.toUpperCase() || 'FILE',
+                  status: 'Ready' as const,
+                  lastEdited: new Date().toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(/\//g, '-'),
+                  addedBy: '海洋饼干',
+                  enabled: true,
+                  sourceType,
+                  previewUrl: file.previewUrl,
+                  ocrStatus: file.ocrStatus,
+                  ocrText: file.ocrText || (sourceType === 'image' ? file.content : undefined),
+                  ocrConfidence: file.ocrConfidence,
+                  ocrMessage: file.ocrMessage,
+                  imageVisionStatus: file.imageVisionStatus,
+                  imageVisionLabels: file.imageVisionLabels,
+                  imageVisionCaption: file.imageVisionCaption,
+                  imageVisionMessage: file.imageVisionMessage,
+                  imageVisionProvider: file.imageVisionProvider,
+                  asrStatus: file.asrStatus,
+                  asrText: file.asrText || (sourceType === 'audio' ? audioTranscriptText : undefined),
+                  asrSegments: audioTranscriptSegments,
+                  asrMessage: file.asrMessage,
+                  asrProvider: file.asrProvider,
+                  content: sourceType === 'image'
+                    ? imageAnalysisChunks.map(formatImageChunkContent).join('\n\n')
+                    : sourceType === 'audio'
+                      ? audioTranscriptText
+                      : sourceText,
+                  chunks: sourceType === 'image'
+                    ? imageAnalysisChunks
+                    : sourceType === 'audio'
+                      ? audioTranscriptSegments.map((segment, index) => ({ id: `asr-${index + 1}`, content: segment.text, type: 'asr_segment', metadata: { timestamp: segment.time } }))
+                      : previewEntries,
+                  sliceRule: sourceType === 'image'
+                    ? (imageAnalysis?.imageType === 'structured' ? '结构化图片切片：OCR 识别 / 语义结构切片' : '非结构化图片切片：整图描述 / 主要对象 / 可见文字')
+                    : sourceType === 'audio'
+                      ? '音频解析（ASR）：时间戳转写 / 原文对齐 / 播放定位'
+                      : getStep2SliceRuleText(),
+                  summary: file.parseNote || (sourceType === 'image' ? (file.ocrText ? '已完成图片 OCR 识别并生成语义切片' : '图片已入库，暂未识别到清晰文字') : sourceType === 'audio' ? (audioTranscriptSegments.length > 0 ? '已完成音视频转写并生成时间戳文本' : '音视频已入库，暂未生成转写文本') : '已按上传规则完成解析与切片')
+                };
+              });
               setKnowledgeBases(prev => prev.map(kb => kb.id === selectedKB.id ? { ...kb, documents: [...newDocs, ...(kb.documents || [])], docsCount: (kb.docsCount || 0) + newDocs.length } : kb));
               setSelectedKB({ ...selectedKB, documents: [...newDocs, ...(selectedKB.documents || [])], docsCount: (selectedKB.docsCount || 0) + newDocs.length });
             }
@@ -2604,21 +4412,30 @@ export default function App() {
   const selectedDepartmentMembers = permissionUsers.filter((user) =>
     selectedDepartment.memberIds.includes(user.id) || user.department === selectedDepartment.name
   );
+  const getDepartmentAccountPrefix = (departmentName: string) => {
+    if (departmentName.includes('技术')) return 'tech';
+    if (departmentName.includes('产品')) return 'product';
+    if (departmentName.includes('HR')) return 'hr';
+    if (departmentName.includes('市场')) return 'marketing';
+    return departmentName.replace(/部门/g, '').toLowerCase() || 'dept';
+  };
   const selectedDepartmentDisplayMembers = [
     ...selectedDepartmentMembers,
     ...Array.from({ length: Math.max(0, selectedDepartment.memberCount - selectedDepartmentMembers.length) }, (_, index) => {
       const serial = index + selectedDepartmentMembers.length + 1;
+      const accountPrefix = getDepartmentAccountPrefix(selectedDepartment.name);
       return {
         id: `${selectedDepartment.id}-M-${String(serial).padStart(3, '0')}`,
         name: `${selectedDepartment.name.replace('部门', '')}成员${serial}`,
-        account: `${selectedDepartment.id.toLowerCase()}-member-${serial}`,
+        account: `${accountPrefix}.member${String(serial).padStart(2, '0')}`,
         avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${selectedDepartment.id}-${serial}`,
         phone: '-',
         email: `${selectedDepartment.id.toLowerCase()}-${serial}@example.com`,
         department: selectedDepartment.name,
         role: '普通成员',
         status: '在职' as const,
-        lastLogin: '-'
+        lastLogin: '-',
+        isPlaceholderDepartmentMember: true
       };
     })
   ];
@@ -2634,11 +4451,12 @@ export default function App() {
   const paginatedPermissionUsers = filteredPermissionUsers.slice(permissionStartIndex, permissionEndIndex);
   const paginatedPermissionRoles = filteredPermissionRoles.slice(permissionStartIndex, permissionEndIndex);
   const paginatedDepartmentMembers = selectedDepartmentDisplayMembers.slice(permissionStartIndex, permissionEndIndex);
+  const selectedPermissionUsers = permissionUsers.filter((user) => selectedPermissionUserIds.includes(user.id));
   const currentPermissionTitle =
     permissionSection === 'users' ? '用户管理' : permissionSection === 'roles' ? '角色管理' : '部门管理';
   const currentPermissionDesc =
     permissionSection === 'users'
-      ? '统一维护账号生命周期、组织归属和角色分配。'
+      ? '统一对用户信息进行管理'
       : permissionSection === 'roles'
         ? '定义系统角色及其权限范围，控制不同岗位的操作边界。'
         : '维护企业组织树、部门负责人和成员规模。';
@@ -2709,12 +4527,16 @@ export default function App() {
       const account = String(formData.get('account') || '').trim();
       const phone = String(formData.get('phone') || '').trim();
       const email = String(formData.get('email') || '').trim();
-      const initialPassword = String(formData.get('initialPassword') || '').trim();
+      const password = String(formData.get('password') || '').trim();
       const department = String(formData.get('department') || UNCONFIGURED_DEPARTMENT);
       const role = String(formData.get('role') || '普通成员');
       const status = String(formData.get('status') || '在职') as PermissionUser['status'];
-      if (!name || !account || !phone || !email || !initialPassword || !role || !status) {
-        showToast('error', '请填写带 * 的必填项');
+      if (!name || !account || !phone || !email || !password || !role || !status) {
+        showToast('error', '请填写必填信息');
+        return;
+      }
+      if (!isValidSixDigitPassword(password)) {
+        showToast('error', PASSWORD_RULE_TEXT);
         return;
       }
       const nextId = `U-${1000 + permissionUsers.length + 1}`;
@@ -2731,18 +4553,48 @@ export default function App() {
         lastLogin: '尚未登录'
       };
       setPermissionUsers(prev => [nextUser, ...prev]);
+      upsertAuthUser({
+        id: nextUser.id,
+        name: nextUser.name,
+        account: nextUser.account,
+        phone: nextUser.phone,
+        email: nextUser.email,
+        avatar: nextUser.avatar,
+        status: nextUser.status
+      });
+      setUserPassword(nextUser.id, password);
       showToast('success', `已添加用户 ${nextUser.name}`);
     }
 
     if (permissionAction.type === 'editUser' && permissionAction.user) {
+      const password = String(formData.get('password') || '').trim();
+      if (!password) {
+        showToast('error', '请填写密码');
+        return;
+      }
+      if (!isValidSixDigitPassword(password)) {
+        showToast('error', PASSWORD_RULE_TEXT);
+        return;
+      }
       const nextUser: PermissionUser = {
         ...permissionAction.user,
         phone: String(formData.get('phone') || permissionAction.user.phone),
         email: String(formData.get('email') || permissionAction.user.email),
         department: String(formData.get('department') || permissionAction.user.department),
+        role: String(formData.get('role') || permissionAction.user.role),
         status: String(formData.get('status') || permissionAction.user.status) as PermissionUser['status']
       };
       setPermissionUsers(prev => prev.map(user => user.id === nextUser.id ? nextUser : user));
+      upsertAuthUser({
+        id: nextUser.id,
+        name: nextUser.name,
+        account: nextUser.account,
+        phone: nextUser.phone,
+        email: nextUser.email,
+        avatar: nextUser.avatar,
+        status: nextUser.status
+      });
+      setUserPassword(nextUser.id, password);
       showToast('success', `${nextUser.name} 信息已更新`);
     }
 
@@ -2757,6 +4609,7 @@ export default function App() {
         ...department,
         memberIds: department.memberIds.filter(memberId => memberId !== permissionAction.user!.id)
       })));
+      removeAuthUser(permissionAction.user.id);
       showToast('success', `${permissionAction.user.name} 已删除`);
     }
 
@@ -2773,6 +4626,15 @@ export default function App() {
       setPermissionUsers(prev => prev.map(user =>
         user.id === permissionAction.user!.id ? { ...user, status: nextStatus } : user
       ));
+      upsertAuthUser({
+        id: permissionAction.user.id,
+        name: permissionAction.user.name,
+        account: permissionAction.user.account,
+        phone: permissionAction.user.phone,
+        email: permissionAction.user.email,
+        avatar: permissionAction.user.avatar,
+        status: nextStatus
+      });
       showToast('success', `${permissionAction.user.name} 已${nextStatus === '在职' ? '启用' : '禁用'}`);
     }
 
@@ -2782,6 +4644,7 @@ export default function App() {
           ? { ...user, lastLogin: '等待用户使用临时密码登录' }
           : user
       ));
+      setUserPassword(permissionAction.user.id, DEFAULT_AUTH_PASSWORD);
       showToast('success', `${permissionAction.user.name} 的临时密码已生成`);
     }
 
@@ -2921,21 +4784,20 @@ export default function App() {
       showToast('success', `已添加 ${member.name}`);
     }
 
-    if (permissionAction.type === 'removeDepartmentMember' && permissionAction.department) {
-      const userId = String(formData.get('memberId') || permissionAction.user?.id || '');
+    if (permissionAction.type === 'removeDepartmentMember' && permissionAction.department && permissionAction.user) {
+      const userId = permissionAction.user.id;
       const member = permissionUsers.find(user => user.id === userId);
-      if (!member) {
-        showToast('error', '请选择要移除的成员');
-        return;
-      }
       setPermissionDepartments(prev => updateDepartmentTree(prev, permissionAction.department!.id, (department) => {
         const memberIds = department.memberIds.filter(id => id !== userId);
-        return { ...department, memberIds, memberCount: memberIds.length };
+        const nextCount = Math.max(0, department.memberCount - 1);
+        return { ...department, memberIds, memberCount: nextCount };
       }));
-      setPermissionUsers(prev => prev.map(user =>
-        user.id === userId ? { ...user, department: UNCONFIGURED_DEPARTMENT } : user
-      ));
-      showToast('success', `已移除 ${member.name}`);
+      if (member) {
+        setPermissionUsers(prev => prev.map(user =>
+          user.id === userId ? { ...user, department: UNCONFIGURED_DEPARTMENT } : user
+        ));
+      }
+      showToast('success', `${permissionAction.user.name} 已移出部门，并标记为${UNCONFIGURED_DEPARTMENT}`);
     }
 
     if (permissionAction.type === 'changeDepartmentMember' && permissionAction.department && permissionAction.user) {
@@ -2945,21 +4807,27 @@ export default function App() {
         showToast('error', '请选择目标部门');
         return;
       }
+      const movingUserId = permissionAction.user.id;
+      const movingUser = permissionUsers.find(user => user.id === movingUserId);
       setPermissionDepartments(prev => {
         const removed = updateDepartmentTree(prev, permissionAction.department!.id, (department) => {
-          const memberIds = department.memberIds.filter(id => id !== permissionAction.user!.id);
-          return { ...department, memberIds, memberCount: memberIds.length };
+          const memberIds = department.memberIds.filter(id => id !== movingUserId);
+          return { ...department, memberIds, memberCount: Math.max(0, department.memberCount - 1) };
         });
         return updateDepartmentTree(removed, targetDepartment.id, (department) => {
-          const memberIds = department.memberIds.includes(permissionAction.user!.id)
+          const memberIds = !movingUser
             ? department.memberIds
-            : [...department.memberIds, permissionAction.user!.id];
-          return { ...department, memberIds, memberCount: memberIds.length };
+            : department.memberIds.includes(movingUserId)
+            ? department.memberIds
+            : [...department.memberIds, movingUserId];
+          return { ...department, memberIds, memberCount: department.memberCount + 1 };
         });
       });
-      setPermissionUsers(prev => prev.map(user =>
-        user.id === permissionAction.user!.id ? { ...user, department: targetDepartment.name } : user
-      ));
+      if (movingUser) {
+        setPermissionUsers(prev => prev.map(user =>
+          user.id === movingUserId ? { ...user, department: targetDepartment.name } : user
+        ));
+      }
       setSelectedDepartmentId(targetDepartment.id);
       showToast('success', `${permissionAction.user.name} 已更换到 ${targetDepartment.name}`);
     }
@@ -2967,22 +4835,22 @@ export default function App() {
     setPermissionAction({ type: null });
   };
 
-  const batchDisablePermissionUsers = () => {
-    if (selectedPermissionUserIds.length < 2) {
-      showToast('warning', '请至少选择 2 个用户后再执行批量操作');
+  const batchUpdatePermissionUsersStatus = (status: PermissionUser['status']) => {
+    if (selectedPermissionUserIds.length === 0) {
+      showToast('warning', '请先选择需要操作的用户');
       return;
     }
     setPermissionUsers(prev => prev.map(user =>
-      selectedPermissionUserIds.includes(user.id) ? { ...user, status: '已禁用' } : user
+      selectedPermissionUserIds.includes(user.id) ? { ...user, status } : user
     ));
-    showToast('success', `已禁用 ${selectedPermissionUserIds.length} 个用户`);
+    showToast('success', `已${status === '在职' ? '启用' : '禁用'} ${selectedPermissionUserIds.length} 个用户`);
     setSelectedPermissionUserIds([]);
-    setShowPermissionBatchMenu(false);
+    setIsPermissionBatchMode(false);
   };
 
   const batchDeletePermissionUsers = () => {
-    if (selectedPermissionUserIds.length < 2) {
-      showToast('warning', '请至少选择 2 个用户后再执行批量操作');
+    if (selectedPermissionUserIds.length === 0) {
+      showToast('warning', '请先选择需要删除的用户');
       return;
     }
     const deletingIds = new Set(selectedPermissionUserIds);
@@ -2995,7 +4863,7 @@ export default function App() {
     );
     showToast('success', `已删除 ${selectedPermissionUserIds.length} 个用户`);
     setSelectedPermissionUserIds([]);
-    setShowPermissionBatchMenu(false);
+    setIsPermissionBatchMode(false);
   };
 
   const renderDepartmentRow = (department: PermissionDepartment, level = 0): ReactNode[] => {
@@ -3058,7 +4926,10 @@ export default function App() {
           )}
           {/* 收起/展开按钮 */}
           <button
-            onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+            onClick={() => {
+              setIsUserSettingsMenuOpen(false);
+              setIsSidebarCollapsed(!isSidebarCollapsed);
+            }}
             className={`p-2 hover:bg-slate-100/80 rounded-lg transition-all text-slate-400 hover:text-slate-600 ${
               isSidebarCollapsed ? 'w-full flex justify-center' : ''
             }`}
@@ -3120,12 +4991,28 @@ export default function App() {
                     )}
                     <Sparkles className={`w-4.5 h-4.5 ${activeModule === 'skill' ? 'text-blue-600' : 'text-slate-400'}`} />
                     <span className="text-[13px]">Skill中心</span>
+                    <ChevronDown className={`ml-auto h-3.5 w-3.5 transition-transform ${activeModule === 'skill' ? 'rotate-180 text-blue-500' : 'text-slate-300'}`} />
                   </button>
                   {activeModule === 'skill' && (
-                    <div className="mt-1 pl-8">
-                      <div className="rounded-md px-3 py-2 text-xs font-medium text-blue-600 bg-blue-50/60">
-                        Skill 模板库
-                      </div>
+                    <div className="mt-1 space-y-1 pl-8">
+                      {SKILL_NAV_ITEMS.map((item) => (
+                        <button
+                          key={item.key}
+                          onClick={() => {
+                            setSelectedKB(null);
+                            setSelectedDocument(null);
+                            setShowNewKBPage(false);
+                            navigate(item.path);
+                          }}
+                          className={`w-full rounded-md px-3 py-1.5 text-left text-[12px] leading-5 font-medium transition-colors ${
+                            activeSkillPage.key === item.key
+                              ? 'bg-blue-50/60 text-blue-600'
+                              : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+                          }`}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -3166,7 +5053,7 @@ export default function App() {
                             setPermissionSection(item.key);
                             setPermissionSearchQuery('');
                           }}
-                          className={`w-full rounded-md px-3 py-2 text-left text-xs font-medium transition-colors ${
+                          className={`w-full rounded-md px-3 py-1.5 text-left text-[12px] leading-5 font-medium transition-colors ${
                             permissionSection === item.key
                               ? 'bg-blue-50/60 text-blue-600'
                               : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
@@ -3246,9 +5133,39 @@ export default function App() {
                 <span className="text-sm font-semibold text-slate-700 leading-none mb-1 truncate">海洋饼干</span>
                 <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Premium</span>
               </div>
-              <button className="text-slate-400 hover:text-slate-600 hover:bg-slate-50/80 p-2 rounded-lg transition-all">
-                <Settings className="w-4.5 h-4.5" />
-              </button>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setIsUserSettingsMenuOpen((open) => !open)}
+                  className={`p-2 rounded-lg transition-all ${
+                    isUserSettingsMenuOpen
+                      ? 'bg-blue-50 text-blue-600'
+                      : 'text-slate-400 hover:text-slate-600 hover:bg-slate-50/80'
+                  }`}
+                  aria-haspopup="menu"
+                  aria-expanded={isUserSettingsMenuOpen}
+                  title="设置"
+                >
+                  <Settings className="w-4.5 h-4.5" />
+                </button>
+                {isUserSettingsMenuOpen && (
+                  <div className="absolute bottom-12 right-0 z-50 w-36 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl shadow-slate-200/70">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsUserSettingsMenuOpen(false);
+                        clearAuthSession();
+                        navigate('/login', {replace: true});
+                      }}
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-blue-600"
+                      role="menuitem"
+                    >
+                      <LogOut className="w-4 h-4" />
+                      <span>退出</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             </>
           ) : (
             <div className="relative group cursor-pointer">
@@ -3347,54 +5264,19 @@ export default function App() {
                           <Plus className="h-4 w-4" />
                           添加用户
                         </button>
-                        <div className="relative">
-                          <button
-                            onClick={() => {
-                              if (!isPermissionBatchMode) {
-                                setIsPermissionBatchMode(true);
-                                setSelectedPermissionUserIds([]);
-                                setShowPermissionBatchMenu(false);
-                                return;
-                              }
-                              if (selectedPermissionUserIds.length < 2) {
-                                showToast('warning', '请至少选择 2 个用户后再执行批量操作');
-                                return;
-                              }
-                              setShowPermissionBatchMenu(prev => !prev);
-                            }}
-                            className={`rounded-xl border px-4 py-2.5 text-sm font-medium transition-all ${
-                              isPermissionBatchMode
-                                ? 'border-blue-200 bg-blue-50 text-blue-600'
-                                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
-                            }`}
-                          >
-                            批量操作{selectedPermissionUserIds.length > 0 ? ` (${selectedPermissionUserIds.length})` : ''}
-                          </button>
-                          {isPermissionBatchMode && (
-                            <button
-                              onClick={() => {
-                                setIsPermissionBatchMode(false);
-                                setSelectedPermissionUserIds([]);
-                                setShowPermissionBatchMenu(false);
-                              }}
-                              className="ml-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium text-slate-500 transition-all hover:bg-slate-50"
-                            >
-                              取消
-                            </button>
-                          )}
-                          {showPermissionBatchMenu && (
-                            <div className="absolute right-0 top-12 z-20 w-36 rounded-xl border border-slate-200 bg-white py-1.5 shadow-xl">
-                              <button onClick={batchDisablePermissionUsers} className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-600 hover:bg-slate-50">
-                                <Lock className="h-3.5 w-3.5" />
-                                批量禁用
-                              </button>
-                              <button onClick={batchDeletePermissionUsers} className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50">
-                                <Trash2 className="h-3.5 w-3.5" />
-                                批量删除
-                              </button>
-                            </div>
-                          )}
-                        </div>
+                        <button
+                          onClick={() => {
+                            setIsPermissionBatchMode(prev => !prev);
+                            setSelectedPermissionUserIds([]);
+                          }}
+                          className={`rounded-xl border px-4 py-2.5 text-sm font-medium transition-all ${
+                            isPermissionBatchMode
+                              ? 'border-blue-200 bg-blue-50 text-blue-600'
+                              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                          }`}
+                        >
+                          {isPermissionBatchMode ? '取消批量' : '批量操作'}
+                        </button>
                       </>
                     )}
                     {permissionSection === 'roles' && (
@@ -3412,7 +5294,17 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white/70 px-4 py-3 shadow-sm backdrop-blur">
+                <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white/70 px-4 py-3 shadow-sm backdrop-blur">
+                  <div className={`relative ${permissionSection === 'users' ? 'w-80' : 'w-[420px]'}`}>
+                    <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder={permissionSection === 'users' ? '搜索用户信息' : `搜索${currentPermissionTitle}...`}
+                      value={permissionSearchQuery}
+                      onChange={(e) => setPermissionSearchQuery(e.target.value)}
+                      className="w-full rounded-lg border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm text-slate-700 placeholder:text-slate-400 transition-all focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/15"
+                    />
+                  </div>
                   {permissionSection === 'users' && (
                     <div className="flex flex-wrap items-center gap-2">
                       <select
@@ -3447,16 +5339,6 @@ export default function App() {
                       </select>
                     </div>
                   )}
-                  <div className={`relative ${permissionSection === 'users' ? 'w-80' : 'w-[420px]'}`}>
-                    <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                    <input
-                      type="text"
-                      placeholder={`搜索${currentPermissionTitle}...`}
-                      value={permissionSearchQuery}
-                      onChange={(e) => setPermissionSearchQuery(e.target.value)}
-                      className="w-full rounded-lg border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm text-slate-700 placeholder:text-slate-400 transition-all focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/15"
-                    />
-                  </div>
                 </div>
 
                 {permissionSection === 'users' && (
@@ -3566,6 +5448,60 @@ export default function App() {
                   </div>
                 )}
 
+                <AnimatePresence>
+                  {permissionSection === 'users' && isPermissionBatchMode && selectedPermissionUserIds.length > 0 && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 18, scale: 0.98 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: 12, scale: 0.98 }}
+                      transition={{ duration: 0.18 }}
+                      className="fixed left-1/2 bottom-24 z-50 -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 px-4 py-3 shadow-2xl shadow-slate-300/40 backdrop-blur-md"
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 border-r border-slate-200 pr-4">
+                          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+                            <Check className="h-4 w-4" />
+                          </div>
+                          <span className="text-sm font-semibold text-slate-800">已选 {selectedPermissionUserIds.length} 条</span>
+                        </div>
+                        <button
+                          onClick={() => batchUpdatePermissionUsersStatus('在职')}
+                          className="rounded-xl px-4 py-2 text-sm font-medium text-blue-600 transition-all hover:bg-blue-50"
+                        >
+                          启用
+                        </button>
+                        <button
+                          onClick={() => batchUpdatePermissionUsersStatus('已禁用')}
+                          className="rounded-xl px-4 py-2 text-sm font-medium text-slate-600 transition-all hover:bg-slate-100"
+                        >
+                          禁用
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (selectedPermissionUserIds.length === 0) {
+                              showToast('warning', '请先选择需要删除的用户');
+                              return;
+                            }
+                            setShowPermissionBatchDeleteConfirm(true);
+                          }}
+                          className="rounded-xl px-4 py-2 text-sm font-medium text-red-600 transition-all hover:bg-red-50"
+                        >
+                          删除
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedPermissionUserIds([]);
+                            setIsPermissionBatchMode(false);
+                          }}
+                          className="rounded-xl px-4 py-2 text-sm font-medium text-slate-500 transition-all hover:bg-slate-100"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
                 {permissionSection === 'roles' && (
                   <div className="space-y-4">
                     <div className="overflow-x-auto overflow-y-visible rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -3599,7 +5535,7 @@ export default function App() {
                                 const permissionList = getRoleKnowledgePermissions(role);
                                 return (
                                   <button key={moduleName} onClick={() => setPermissionAction({ type: 'viewRolePermissions', role })} className="rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 transition-all hover:bg-blue-50 hover:text-blue-600">
-                                    页面权限 {permissionList.length} 项
+                                    权限 {permissionList.length} 项
                                   </button>
                                 );
                               })}
@@ -3640,8 +5576,8 @@ export default function App() {
                 )}
 
                 {permissionSection === 'departments' && (
-                  <div className="grid grid-cols-[minmax(360px,0.9fr)_minmax(520px,1.4fr)] gap-5">
-                    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                  <div className="grid grid-cols-[minmax(240px,0.62fr)_minmax(0,1.38fr)] gap-4">
+                    <div className="min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
                       <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50/90 px-4 py-3">
                         <div>
                           <div className="text-sm font-semibold text-slate-900">部门树</div>
@@ -3654,7 +5590,7 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="space-y-4">
+                    <div className="min-w-0 space-y-4">
                       <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
                         <div className="flex items-start justify-between gap-4">
                           <div>
@@ -3679,16 +5615,16 @@ export default function App() {
                             <div className="mt-0.5 text-xs text-slate-500">可查看成员账号，并对当前部门成员执行移出或更换部门。</div>
                           </div>
                         </div>
-                        <div className="grid grid-cols-[minmax(180px,1.1fr)_minmax(160px,0.9fr)_140px_190px] items-center gap-3 border-b border-slate-200 bg-white px-4 py-3 text-xs font-semibold text-slate-500">
+                        <div className="grid grid-cols-[minmax(130px,1.15fr)_minmax(120px,0.95fr)_88px_128px] items-center gap-2 border-b border-slate-200 bg-white px-3 py-3 text-xs font-semibold text-slate-500">
                           <div>成员</div>
                           <div>账号</div>
                           <div>角色</div>
-                          <div className="text-right">操作</div>
+                          <div className="text-center">操作</div>
                         </div>
                         <div className="divide-y divide-slate-100">
                           {selectedDepartmentDisplayMembers.length > 0 ? (
                             paginatedDepartmentMembers.map((user) => (
-                              <div key={user.id} className="grid grid-cols-[minmax(180px,1.1fr)_minmax(160px,0.9fr)_140px_190px] items-center gap-3 px-4 py-3 text-sm hover:bg-slate-50">
+                              <div key={user.id} className="grid grid-cols-[minmax(130px,1.15fr)_minmax(120px,0.95fr)_88px_128px] items-center gap-2 px-3 py-3 text-sm hover:bg-slate-50">
                                 <div className="flex min-w-0 items-center gap-3">
                                   <img src={user.avatar} alt={user.name} className="h-9 w-9 shrink-0 rounded-lg border border-slate-200 bg-white" />
                                   <div className="min-w-0">
@@ -3699,15 +5635,23 @@ export default function App() {
                                 <div className="flex flex-wrap gap-1.5">
                                   <span className="rounded-md bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-600">{user.role}</span>
                                 </div>
-                                <div className="text-right">
-                                  <div className="inline-flex items-center gap-2 whitespace-nowrap">
-                                    <button onClick={() => setPermissionAction({ type: 'removeDepartmentMember', department: selectedDepartment, user })} className="inline-flex items-center gap-1.5 rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-600 transition-all hover:border-red-300 hover:bg-red-100">
+                                <div className="flex justify-center">
+                                  <div className="inline-flex items-center justify-center gap-1.5 whitespace-nowrap">
+                                    <button
+                                      onClick={() => setPermissionAction({ type: 'removeDepartmentMember', department: selectedDepartment, user })}
+                                      className="inline-flex items-center gap-1 rounded-md px-1 py-1 text-xs font-medium text-slate-400 transition-all hover:bg-red-50 hover:text-red-600"
+                                      title={`将 ${user.name} 移出当前部门`}
+                                    >
                                       <X className="h-3.5 w-3.5" />
-                                      移出部门
+                                      移出
                                     </button>
-                                    <button onClick={() => setPermissionAction({ type: 'changeDepartmentMember', department: selectedDepartment, user })} className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-600 transition-all hover:border-blue-300 hover:bg-blue-100">
+                                    <button
+                                      onClick={() => setPermissionAction({ type: 'changeDepartmentMember', department: selectedDepartment, user })}
+                                      className="inline-flex items-center gap-1 rounded-md px-1 py-1 text-xs font-medium text-blue-500 transition-all hover:bg-blue-50 hover:text-blue-700"
+                                      title={`为 ${user.name} 更换部门`}
+                                    >
                                       <Workflow className="h-3.5 w-3.5" />
-                                      更换部门
+                                      更换
                                     </button>
                                   </div>
                                 </div>
@@ -3717,12 +5661,53 @@ export default function App() {
                             <div className="px-4 py-10 text-center text-sm text-slate-400">当前部门暂无示例成员</div>
                           )}
                         </div>
+                        {selectedDepartmentDisplayMembers.length > 0 && (
+                          <div className="flex items-center justify-end border-t border-slate-200 bg-white px-4 py-3">
+                            <div className="inline-flex items-center gap-2.5">
+                              <span className="text-sm font-medium text-slate-600">
+                                共 {selectedDepartmentDisplayMembers.length} 条
+                              </span>
+                              <button
+                                onClick={() => setPermissionPage(prev => Math.max(1, prev - 1))}
+                                disabled={permissionPage === 1}
+                                className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition-all hover:bg-slate-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-slate-400"
+                              >
+                                <ChevronLeft className="h-4 w-4 text-slate-600" />
+                              </button>
+                              <span className="flex h-9 min-w-9 items-center justify-center rounded-lg bg-slate-100 px-3 text-sm font-semibold text-slate-900">
+                                {Math.min(permissionPage, permissionTotalPages)}
+                              </span>
+                              <button
+                                onClick={() => setPermissionPage(prev => Math.min(permissionTotalPages, prev + 1))}
+                                disabled={permissionPage === permissionTotalPages}
+                                className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition-all hover:bg-slate-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-slate-400"
+                              >
+                                <ChevronRightIcon className="h-4 w-4 text-slate-600" />
+                              </button>
+                              <div className="relative">
+                                <select
+                                  value={permissionItemsPerPage}
+                                  onChange={(e) => {
+                                    setPermissionItemsPerPage(Number(e.target.value));
+                                    setPermissionPage(1);
+                                  }}
+                                  className="h-9 cursor-pointer appearance-none rounded-lg border border-slate-200 bg-white px-3 pr-8 text-sm font-medium text-slate-600 shadow-sm transition-all hover:border-blue-200 hover:text-blue-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/15"
+                                >
+                                  <option value={10}>10 条/页</option>
+                                  <option value={20}>20 条/页</option>
+                                  <option value={50}>50 条/页</option>
+                                </select>
+                                <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
                 )}
 
-                {permissionPaginationSource.length > 0 && (
+                {permissionSection !== 'departments' && permissionPaginationSource.length > 0 && (
                   <div className="flex items-center justify-end border-t border-slate-200 bg-white px-4 py-3 shadow-sm">
                     <div className="inline-flex items-center gap-2.5">
                       <span className="text-sm font-medium text-slate-600">
@@ -3769,65 +5754,12 @@ export default function App() {
         ) : activeModule === 'skill' ? (
           <div className="flex-1 flex flex-col h-full overflow-hidden bg-slate-50">
             <div className="flex-1 overflow-y-auto px-8 py-6 no-scrollbar">
-              <div className="max-w-[1600px] mx-auto space-y-5">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-xl font-bold text-slate-900">Skill 模板库</h2>
-                    <p className="mt-1 text-sm text-slate-500">维护知识加工 Skill 模板，查看启用状态、调用表现和版本信息。</p>
-                  </div>
-                </div>
-
-                <div className="bg-white border border-slate-200 rounded-lg shadow-sm overflow-x-auto">
-                  <div className="grid min-w-[1120px] grid-cols-[minmax(150px,1.1fr)_110px_minmax(190px,1.3fr)_120px_minmax(120px,1fr)_90px_100px_90px_80px] items-center gap-3 border-b border-slate-200 bg-slate-50/90 px-4 py-3 text-xs font-semibold text-slate-500">
-                    <div>Skill 名称</div>
-                    <div>Skill 类型</div>
-                    <div>适用对象</div>
-                    <div>输入</div>
-                    <div>输出</div>
-                    <div className="text-center">是否启用</div>
-                    <div className="text-right">使用次数</div>
-                    <div className="text-right">成功率</div>
-                    <div className="text-right">版本</div>
-                  </div>
-
-                  <div className="divide-y divide-slate-100">
-                    {INITIAL_SKILL_TEMPLATES.map((skill) => (
-                      <div
-                        key={skill.id}
-                        className="grid min-w-[1120px] grid-cols-[minmax(150px,1.1fr)_110px_minmax(190px,1.3fr)_120px_minmax(120px,1fr)_90px_100px_90px_80px] items-center gap-3 px-4 py-4 text-sm transition-colors hover:bg-slate-50"
-                      >
-                        <div className="flex min-w-0 items-center gap-3">
-                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
-                            <Sparkles className="h-4 w-4" />
-                          </div>
-                          <div className="min-w-0">
-                            <div className="truncate font-semibold text-slate-900">{skill.name}</div>
-                            <div className="mt-0.5 text-xs text-slate-400">{skill.id}</div>
-                          </div>
-                        </div>
-                        <div className="text-slate-700">{skill.type}</div>
-                        <div className="truncate text-slate-600" title={skill.target}>{skill.target}</div>
-                        <div className="text-slate-600">{skill.input}</div>
-                        <div className="text-slate-600">{skill.output}</div>
-                        <div className="flex justify-center">
-                          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${
-                            skill.enabled ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'
-                          }`}>
-                            <span className={`h-1.5 w-1.5 rounded-full ${skill.enabled ? 'bg-emerald-500' : 'bg-slate-400'}`} />
-                            {skill.enabled ? '是' : '否'}
-                          </span>
-                        </div>
-                        <div className="text-right font-medium text-slate-700">{skill.usageCount.toLocaleString()}</div>
-                        <div className="text-right font-medium text-slate-700">{skill.successRate}</div>
-                        <div className="text-right">
-                          <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600">
-                            {skill.version}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+              <div className="max-w-[1600px] mx-auto">
+                <SkillCenterPage
+                  activePageKey={activeSkillPage.key}
+                  activePageLabel={activeSkillPage.label}
+                  onNotify={showToast}
+                />
               </div>
             </div>
           </div>
@@ -4033,178 +5965,540 @@ export default function App() {
                       ))}
                     </div>
 
-                    {newKBConfig.permissionType === 'partial' && (
-                      <div className="space-y-4 pt-2">
-                        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50 px-5 py-4">
-                          <div>
-                            <div className="text-sm font-semibold text-blue-900">当前为部分公开，已选择以下范围</div>
-                            <p className="mt-1 text-xs text-blue-700">添加的部门或人员默认是普通成员；开启管理员后可编辑、删除文件并邀请成员。</p>
-                          </div>
-                          <div className="flex divide-x divide-blue-100 overflow-hidden rounded-lg border border-blue-100 bg-white text-xs font-medium text-blue-700">
-                            <span className="px-3 py-2">已选部门 <b className="ml-1">{teamPermissions.length}</b></span>
-                            <span className="px-3 py-2">已选人员 <b className="ml-1">{selectedMembers.length}</b></span>
-                            <span className="px-3 py-2">管理员 <b className="ml-1">{teamPermissions.filter(item => item.permission === 'manage').length + selectedMembers.filter(item => item.permission === 'manage').length}</b></span>
-                          </div>
-                        </div>
+                    {newKBConfig.permissionType === 'partial' && (() => {
+                      const permissionOptions = [
+                        { value: 'view', label: '只读' },
+                        { value: 'edit', label: '编辑' },
+                        { value: 'manage', label: '管理' }
+                      ] as const;
+                      const departmentGroups = Array.from(mockTeams.reduce((map, team) => {
+                        const current = map.get(team.department) || {
+                          id: `department-${team.department}`,
+                          name: team.department,
+                          teams: [] as string[],
+                          members: [] as Array<{ id: string; name: string; avatar?: string }>,
+                          memberCount: 0
+                        };
+                        const memberMap = new Map(current.members.map(member => [member.id, member]));
+                        team.members.forEach(member => memberMap.set(member.id, member));
+                        current.teams = Array.from(new Set([...current.teams, team.name]));
+                        current.members = Array.from(memberMap.values());
+                        current.memberCount = current.members.length;
+                        map.set(team.department, current);
+                        return map;
+                      }, new Map<string, any>()).values());
+                      const scopeMembers = Array.from([...mockTeams.flatMap(team => team.members), ...mockRoles.flatMap(role => role.members)]
+                        .reduce((map, member) => map.set(member.id, member), new Map<string, any>()).values());
+                      const memberMeta = new Map(scopeMembers.map(member => [member.id, {
+                        departments: departmentGroups.filter(department => department.members.some(item => item.id === member.id)).map(department => department.name),
+                        roles: mockRoles.filter(role => role.members.some(item => item.id === member.id)).map(role => role.name)
+                      }]));
+                      const effectiveMembers = resolvePartialAccessMembers();
+                      const candidateQuery = partialCandidateSearch.trim().toLowerCase();
+                      const selectedQuery = partialSelectedSearch.trim().toLowerCase();
+                      const filteredDepartments = departmentGroups.filter(department => {
+                        const haystack = [department.name, ...department.teams, ...department.members.map(member => member.name)].join(' ').toLowerCase();
+                        return !candidateQuery || haystack.includes(candidateQuery);
+                      });
+                      const filteredRoles = mockRoles.filter(role => {
+                        const haystack = [role.name, ...role.members.map(member => member.name)].join(' ').toLowerCase();
+                        return !candidateQuery || haystack.includes(candidateQuery);
+                      });
+                      const filteredScopeMembers = scopeMembers.filter(member => {
+                        const meta = memberMeta.get(member.id) || { departments: [], roles: [] };
+                        const haystack = [member.name, member.id, ...meta.departments, ...meta.roles].join(' ').toLowerCase();
+                        return !candidateQuery || haystack.includes(candidateQuery);
+                      });
+                      const isMemberConfigured = (memberId: string) =>
+                        selectedMembers.some(member => member.id === memberId) ||
+                        teamPermissions.some(department => department.members.some(member => member.id === memberId) && !department.excludedMembers.includes(memberId)) ||
+                        rolePermissions.some(role => role.members.some(member => member.id === memberId) && !role.excludedMembers.includes(memberId));
+                      const visibleScopeMembers = filteredScopeMembers.filter(member =>
+                        partialMemberConfigFilter === 'configured' ? isMemberConfigured(member.id) : !isMemberConfigured(member.id)
+                      );
+                      const configuredMemberCount = scopeMembers.filter(member => isMemberConfigured(member.id)).length;
+                      const unconfiguredMemberCount = scopeMembers.length - configuredMemberCount;
+                      const visibleEffectiveMembers = effectiveMembers.filter(member => {
+                        const meta = memberMeta.get(member.id) || { departments: [], roles: [] };
+                        const haystack = [member.name, member.id, ...meta.departments, ...meta.roles, ...member.sources].join(' ').toLowerCase();
+                        const matchesSearch = !selectedQuery || haystack.includes(selectedQuery);
+                        const matchesDepartment = partialSelectedDepartmentFilter === 'all' || meta.departments.includes(partialSelectedDepartmentFilter);
+                        const matchesRole = partialSelectedRoleFilter === 'all' || meta.roles.includes(partialSelectedRoleFilter);
+                        const matchesPermission = partialSelectedPermissionFilter === 'all' || member.permission === partialSelectedPermissionFilter;
+                        return matchesSearch && matchesDepartment && matchesRole && matchesPermission;
+                      });
+                      const allVisibleSelected = visibleEffectiveMembers.length > 0 && visibleEffectiveMembers.every(member => selectedPartialMemberIds.includes(member.id));
+                      const removeMembersFromScope = (memberIds: string[]) => {
+                        const ids = Array.from(new Set(memberIds));
+                        if (ids.length === 0) {
+                          showToast('warning', '请先选择需要剔除的成员');
+                          return;
+                        }
+                        setSelectedMembers(prev => prev.filter(member => !ids.includes(member.id)));
+                        setRolePermissions(prev => prev.map(role => {
+                          const excluded = role.members.filter(member => ids.includes(member.id)).map(member => member.id);
+                          return excluded.length ? { ...role, excludedMembers: Array.from(new Set([...role.excludedMembers, ...excluded])) } : role;
+                        }));
+                        setTeamPermissions(prev => prev.map(department => {
+                          const excluded = department.members.filter(member => ids.includes(member.id)).map(member => member.id);
+                          return excluded.length ? { ...department, excludedMembers: Array.from(new Set([...department.excludedMembers, ...excluded])) } : department;
+                        }));
+                        setSelectedPartialMemberIds(prev => prev.filter(id => !ids.includes(id)));
+                        showToast('success', `已剔除 ${ids.length} 个成员`);
+                      };
+                      const bulkAddDepartments = () => {
+                        const targets = departmentGroups.filter(department => pendingPartialDepartmentIds.includes(department.id));
+                        if (targets.length === 0) {
+                          showToast('warning', '请先选择部门');
+                          return;
+                        }
+                        setTeamPermissions(prev => {
+                          const next = [...prev];
+                          targets.forEach(department => {
+                            const existingIndex = next.findIndex(item => item.teamId === department.id);
+                            const nextPermission = {
+                              teamId: department.id,
+                              teamName: department.name,
+                              memberCount: department.memberCount,
+                              permission: partialBulkPermission,
+                              members: department.members,
+                              excludedMembers: [],
+                              memberPermissions: Object.fromEntries(department.members.map(member => [member.id, partialBulkPermission]))
+                            };
+                            if (existingIndex >= 0) {
+                              next[existingIndex] = { ...next[existingIndex], ...nextPermission };
+                            } else {
+                              next.push(nextPermission);
+                            }
+                          });
+                          return next;
+                        });
+                        setPendingPartialDepartmentIds([]);
+                        showToast('success', `已批量添加 ${targets.length} 个部门`);
+                      };
+                      const bulkAddRoles = () => {
+                        const targets = mockRoles.filter(role => pendingPartialRoleIds.includes(role.id));
+                        if (targets.length === 0) {
+                          showToast('warning', '请先选择角色');
+                          return;
+                        }
+                        setRolePermissions(prev => {
+                          const next = [...prev];
+                          targets.forEach(role => {
+                            const existingIndex = next.findIndex(item => item.roleId === role.id);
+                            const nextPermission = {
+                              roleId: role.id,
+                              roleName: role.name,
+                              memberCount: role.memberCount,
+                              permission: partialBulkPermission,
+                              members: role.members,
+                              excludedMembers: [],
+                              memberPermissions: Object.fromEntries(role.members.map(member => [member.id, partialBulkPermission]))
+                            };
+                            if (existingIndex >= 0) {
+                              next[existingIndex] = { ...next[existingIndex], ...nextPermission };
+                            } else {
+                              next.push(nextPermission);
+                            }
+                          });
+                          return next;
+                        });
+                        setPendingPartialRoleIds([]);
+                        showToast('success', `已批量添加 ${targets.length} 个角色`);
+                      };
 
-                        <div className="grid grid-cols-2 gap-5">
-                          <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
-                            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
-                              <div className="flex items-center gap-2">
-                                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
-                                  <Network className="h-4 w-4" />
-                                </div>
-                                <div>
-                                  <div className="text-sm font-bold text-slate-900">部门授权</div>
-                                  <div className="text-xs text-slate-500">选择可访问的部门</div>
-                                </div>
-                              </div>
-                              <span className="text-xs text-slate-400">已选 {teamPermissions.length}</span>
-                            </div>
-                            <div className="max-h-[340px] space-y-2 overflow-y-auto p-4">
-                              {allDepartmentOptions.map((team) => {
-                                const departmentMembers = permissionUsers.filter(user => user.department === team.name || team.memberIds.includes(user.id));
-                                const selectedPermission = teamPermissions.find(item => item.teamId === team.id);
-                                const selected = Boolean(selectedPermission);
-                                return (
-                                  <div key={team.id} className={`rounded-xl border p-3 transition-all ${selected ? 'border-blue-200 bg-blue-50/80' : 'border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50'}`}>
-                                    <div className="flex items-center justify-between gap-3">
-                                      <button
-                                        onClick={() => {
-                                          if (selected) {
-                                            setTeamPermissions(teamPermissions.filter(item => item.teamId !== team.id));
-                                          } else {
-                                            const memberPermissions: Record<string, 'view' | 'edit' | 'manage'> = {};
-                                            departmentMembers.forEach(member => { memberPermissions[member.id] = 'view'; });
-                                            setTeamPermissions([...teamPermissions, {
-                                              teamId: team.id,
-                                              teamName: team.name,
-                                              memberCount: team.memberCount,
-                                              permission: 'view',
-                                              members: departmentMembers,
-                                              excludedMembers: [],
-                                              memberPermissions
-                                            }]);
-                                          }
-                                        }}
-                                        className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                                      >
-                                        <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${selected ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
-                                          {selected ? <Check className="h-4 w-4" /> : <Users className="h-4 w-4" />}
-                                        </span>
-                                        <span className="min-w-0">
-                                          <span className="block truncate text-sm font-semibold text-slate-900">{team.name}</span>
-                                          <span className="block text-xs text-slate-500">负责人 {team.owner} · {team.memberCount}人</span>
-                                        </span>
-                                      </button>
-                                      <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${selected ? 'bg-white text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
-                                        {selectedPermission?.permission === 'manage' ? '知识库管理员' : selected ? '普通成员' : '未添加'}
-                                      </span>
-                                    </div>
-                                    {selected && (
-                                      <label className="mt-3 flex items-center justify-between rounded-lg bg-white px-3 py-2 text-xs text-slate-600">
-                                        <span>设为管理员</span>
-                                        <input
-                                          type="checkbox"
-                                          checked={selectedPermission?.permission === 'manage'}
-                                          onChange={(e) => {
-                                            setTeamPermissions(teamPermissions.map(item =>
-                                              item.teamId === team.id
-                                                ? { ...item, permission: e.target.checked ? 'manage' : 'view' }
-                                                : item
-                                            ));
-                                          }}
-                                          className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                        />
-                                      </label>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-
-                          <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
-                            <div className="border-b border-slate-100 px-5 py-4">
-                              <div className="flex items-center justify-between gap-3">
-                                <div className="flex items-center gap-2">
-                                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
-                                    <User className="h-4 w-4" />
-                                  </div>
+                      return (
+                        <div className="pt-2">
+                          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(460px,1.1fr)]">
+                            <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+                              <div className="border-b border-slate-100 px-5 py-4">
+                                <div className="flex flex-wrap items-start justify-between gap-3">
                                   <div>
-                                  <div className="text-sm font-bold text-slate-900">人员授权</div>
-                                  <div className="text-xs text-slate-500">选择可访问的成员</div>
+                                    <div className="text-sm font-bold text-slate-900">添加授权范围</div>
+                                    <div className="mt-1 text-xs text-slate-500">按部门、角色批量添加，也可以单独补充人员。</div>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs text-slate-500">默认权限</span>
+                                    <select
+                                      value={partialBulkPermission}
+                                      onChange={(e) => setPartialBulkPermission(e.target.value as 'view' | 'edit' | 'manage')}
+                                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                                    >
+                                      {permissionOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                                    </select>
                                   </div>
                                 </div>
-                                <span className="text-xs text-slate-400">已选 {selectedMembers.length}</span>
+                                <div className="mt-4 grid grid-cols-3 gap-2 rounded-xl bg-slate-100 p-1">
+                                  {[
+                                    { value: 'team', label: '部门', count: teamPermissions.length },
+                                    { value: 'role', label: '角色', count: rolePermissions.length },
+                                    { value: 'member', label: '人员', count: selectedMembers.length }
+                                  ].map(item => (
+                                    <button
+                                      key={item.value}
+                                      onClick={() => setSelectedPermissionTab(item.value as 'member' | 'role' | 'team')}
+                                      className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all ${
+                                        selectedPermissionTab === item.value
+                                          ? 'bg-white text-blue-700 shadow-sm'
+                                          : 'text-slate-500 hover:text-slate-800'
+                                      }`}
+                                    >
+                                      {item.label} <span className="ml-1 text-[11px]">{item.count}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                                <div className="relative mt-4">
+                                  <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                                  <input
+                                    value={partialCandidateSearch}
+                                    onChange={(e) => setPartialCandidateSearch(e.target.value)}
+                                    placeholder="搜索部门、角色或人员"
+                                    className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-xs outline-none focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-500/20"
+                                  />
+                                </div>
                               </div>
-                              <div className="relative mt-4">
-                                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                                <input
-                                  value={collaboratorSearchQuery}
-                                  onChange={(e) => setCollaboratorSearchQuery(e.target.value)}
-                                  placeholder="搜索人员姓名"
-                                  className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2.5 pl-10 pr-4 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                                />
-                              </div>
-                            </div>
-                            <div className="max-h-[280px] space-y-2 overflow-y-auto p-4">
-                              {allMembers
-                                .filter(member => collaboratorSearchQuery === '' || member.name.toLowerCase().includes(collaboratorSearchQuery.toLowerCase()))
-                                .slice(0, 10)
-                                .map((member) => {
-                                  const selectedPermission = selectedMembers.find(item => item.id === member.id);
-                                  const selected = Boolean(selectedPermission);
-                                  return (
-                                    <div key={member.id} className={`rounded-xl border p-3 transition-all ${selected ? 'border-blue-200 bg-blue-50/80' : 'border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50'}`}>
-                                      <div className="flex items-center justify-between gap-3">
-                                        <button
-                                          onClick={() => {
-                                            if (selected) {
-                                              setSelectedMembers(selectedMembers.filter(item => item.id !== member.id));
-                                            } else {
-                                              setSelectedMembers([...selectedMembers, { id: member.id, name: member.name, permission: 'view' }]);
-                                            }
-                                          }}
-                                          className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                                        >
-                                          <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold ${selected ? 'bg-blue-600 text-white' : 'bg-slate-500 text-white'}`}>
-                                            {selected ? <Check className="h-4 w-4" /> : member.name.charAt(0)}
-                                          </span>
-                                          <span className="min-w-0">
-                                            <span className="block truncate text-sm font-semibold text-slate-900">{member.name}</span>
-                                            <span className="block text-xs text-slate-500">{member.id}</span>
-                                          </span>
-                                        </button>
-                                        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${selected ? 'bg-white text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
-                                          {selectedPermission?.permission === 'manage' ? '知识库管理员' : selected ? '普通成员' : '未添加'}
-                                        </span>
-                                      </div>
-                                      {selected && (
-                                        <label className="mt-3 flex items-center justify-between rounded-lg bg-white px-3 py-2 text-xs text-slate-600">
-                                          <span>设为管理员</span>
-                                          <input
-                                            type="checkbox"
-                                            checked={selectedPermission?.permission === 'manage'}
-                                            onChange={(e) => {
-                                              setSelectedMembers(selectedMembers.map(item =>
-                                                item.id === member.id
-                                                  ? { ...item, permission: e.target.checked ? 'manage' : 'view' }
-                                                  : item
-                                              ));
-                                            }}
-                                            className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                          />
-                                        </label>
-                                      )}
+
+                              <div className="max-h-[500px] overflow-y-auto p-4">
+                                {selectedPermissionTab === 'team' && (
+                                  <section className="space-y-3">
+                                    <div className="flex items-center justify-between gap-3">
+                                      <div className="text-xs text-slate-500">已勾选 {pendingPartialDepartmentIds.length} 个部门</div>
+                                      <button
+                                        onClick={bulkAddDepartments}
+                                        className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-blue-700"
+                                      >
+                                        <Plus className="h-3.5 w-3.5" />批量添加
+                                      </button>
                                     </div>
-                                  );
-                                })}
+                                    {filteredDepartments.map(department => {
+                                      const selectedPermission = teamPermissions.find(item => item.teamId === department.id);
+                                      const checked = pendingPartialDepartmentIds.includes(department.id);
+                                      return (
+                                        <div key={department.id} className={`rounded-xl border bg-white p-3 transition ${checked || selectedPermission ? 'border-blue-200 ring-1 ring-blue-100' : 'border-slate-200 hover:border-slate-300'}`}>
+                                          <div className="flex items-start gap-3">
+                                            <input
+                                              type="checkbox"
+                                              checked={checked}
+                                              onChange={() => setPendingPartialDepartmentIds(prev => prev.includes(department.id) ? prev.filter(id => id !== department.id) : [...prev, department.id])}
+                                              className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600"
+                                            />
+                                            <div className="min-w-0 flex-1">
+                                              <div className="flex flex-wrap items-center gap-2">
+                                                <div className="font-semibold text-slate-900">{department.name}</div>
+                                                {selectedPermission && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700">已添加</span>}
+                                              </div>
+                                              <div className="mt-1 text-xs text-slate-500">{department.memberCount} 人 · 按部门范围继承权限</div>
+                                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                                {department.members.slice(0, 6).map(member => (
+                                                  <span key={member.id} className="rounded-md bg-slate-50 px-2 py-1 text-[11px] text-slate-500">{member.name}</span>
+                                                ))}
+                                                {department.members.length > 6 && <span className="rounded-md bg-slate-50 px-2 py-1 text-[11px] text-slate-400">+{department.members.length - 6}</span>}
+                                              </div>
+                                            </div>
+                                            {selectedPermission && (
+                                              <select
+                                                value={selectedPermission.permission}
+                                                onChange={(e) => setTeamPermissions(teamPermissions.map(item => item.teamId === department.id ? {
+                                                  ...item,
+                                                  permission: e.target.value as 'view' | 'edit' | 'manage',
+                                                  memberPermissions: Object.fromEntries(item.members.map(member => [member.id, e.target.value as 'view' | 'edit' | 'manage']))
+                                                } : item))}
+                                                className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-600"
+                                              >
+                                                {permissionOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                                              </select>
+                                            )}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </section>
+                                )}
+
+                                {selectedPermissionTab === 'role' && (
+                                  <section className="space-y-3">
+                                    <div className="flex items-center justify-between gap-3">
+                                      <div className="text-xs text-slate-500">已勾选 {pendingPartialRoleIds.length} 个角色</div>
+                                      <button
+                                        onClick={bulkAddRoles}
+                                        className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-blue-700"
+                                      >
+                                        <Plus className="h-3.5 w-3.5" />批量添加
+                                      </button>
+                                    </div>
+                                    {filteredRoles.map(role => {
+                                      const selectedPermission = rolePermissions.find(item => item.roleId === role.id);
+                                      const checked = pendingPartialRoleIds.includes(role.id);
+                                      return (
+                                        <div key={role.id} className={`rounded-xl border bg-white p-3 transition ${checked || selectedPermission ? 'border-purple-200 ring-1 ring-purple-100' : 'border-slate-200 hover:border-slate-300'}`}>
+                                          <div className="flex items-start gap-3">
+                                            <input
+                                              type="checkbox"
+                                              checked={checked}
+                                              onChange={() => setPendingPartialRoleIds(prev => prev.includes(role.id) ? prev.filter(id => id !== role.id) : [...prev, role.id])}
+                                              className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600"
+                                            />
+                                            <div className="min-w-0 flex-1">
+                                              <div className="flex flex-wrap items-center gap-2">
+                                                <div className="font-semibold text-slate-900">{role.name}</div>
+                                                {selectedPermission && <span className="rounded-full bg-purple-50 px-2 py-0.5 text-[11px] font-semibold text-purple-700">已添加</span>}
+                                              </div>
+                                              <div className="mt-1 text-xs text-slate-500">{role.memberCount} 人 · 按角色继承权限</div>
+                                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                                {role.members.slice(0, 6).map(member => (
+                                                  <span key={member.id} className="rounded-md bg-slate-50 px-2 py-1 text-[11px] text-slate-500">{member.name}</span>
+                                                ))}
+                                              </div>
+                                            </div>
+                                            {selectedPermission && (
+                                              <select
+                                                value={selectedPermission.permission}
+                                                onChange={(e) => setRolePermissions(rolePermissions.map(item => item.roleId === role.id ? {
+                                                  ...item,
+                                                  permission: e.target.value as 'view' | 'edit' | 'manage',
+                                                  memberPermissions: Object.fromEntries(item.members.map(member => [member.id, e.target.value as 'view' | 'edit' | 'manage']))
+                                                } : item))}
+                                                className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-600"
+                                              >
+                                                {permissionOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                                              </select>
+                                            )}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </section>
+                                )}
+
+                                {selectedPermissionTab === 'member' && (
+                                  <section className="space-y-3">
+                                    <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1">
+                                      {[
+                                        { value: 'unconfigured', label: '未配置', count: unconfiguredMemberCount },
+                                        { value: 'configured', label: '已配置', count: configuredMemberCount }
+                                      ].map(item => (
+                                        <button
+                                          key={item.value}
+                                          onClick={() => setPartialMemberConfigFilter(item.value as 'unconfigured' | 'configured')}
+                                          className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all ${
+                                            partialMemberConfigFilter === item.value
+                                              ? 'bg-white text-blue-700 shadow-sm'
+                                              : 'text-slate-500 hover:text-slate-800'
+                                          }`}
+                                        >
+                                          {item.label} <span className="ml-1 text-[11px]">{item.count}</span>
+                                        </button>
+                                      ))}
+                                    </div>
+
+                                    {visibleScopeMembers.slice(0, 16).map(member => {
+                                      const selectedPermission = selectedMembers.find(item => item.id === member.id);
+                                      const directSelected = Boolean(selectedPermission);
+                                      const configured = isMemberConfigured(member.id);
+                                      const meta = memberMeta.get(member.id) || { departments: [], roles: [] };
+                                      return (
+                                        <div key={member.id} className={`rounded-xl border bg-white p-3 transition ${configured ? 'border-blue-200 ring-1 ring-blue-100' : 'border-slate-200 hover:border-slate-300'}`}>
+                                          <div className="flex items-start gap-3">
+                                            <button
+                                              onClick={() => {
+                                                if (directSelected) {
+                                                  setSelectedMembers(selectedMembers.filter(item => item.id !== member.id));
+                                                } else {
+                                                  setSelectedMembers([...selectedMembers, { id: member.id, name: member.name, permission: partialBulkPermission }]);
+                                                }
+                                              }}
+                                              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-bold ${configured ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'}`}
+                                            >
+                                              {configured ? <Check className="h-4 w-4" /> : member.name.charAt(0)}
+                                            </button>
+                                            <div className="min-w-0 flex-1">
+                                              <div className="flex flex-wrap items-center gap-2">
+                                                <span className="font-semibold text-slate-900">{member.name}</span>
+                                                {configured && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700">已配置</span>}
+                                                {configured && !directSelected && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-500">继承配置</span>}
+                                              </div>
+                                              <div className="mt-1 text-xs text-slate-500">{meta.departments.join('、') || '未归属部门'} · {meta.roles.join('、') || '无角色'}</div>
+                                            </div>
+                                            <div className="flex shrink-0 items-center gap-2">
+                                              {directSelected && (
+                                              <select
+                                                value={selectedPermission?.permission || 'view'}
+                                                onChange={(e) => setSelectedMembers(selectedMembers.map(item => item.id === member.id ? { ...item, permission: e.target.value as 'view' | 'edit' | 'manage' } : item))}
+                                                className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-600"
+                                              >
+                                                {permissionOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                                              </select>
+                                              )}
+                                              <button
+                                                onClick={() => {
+                                                  if (directSelected) {
+                                                    setSelectedMembers(selectedMembers.filter(item => item.id !== member.id));
+                                                  } else {
+                                                    setSelectedMembers([...selectedMembers, { id: member.id, name: member.name, permission: partialBulkPermission }]);
+                                                  }
+                                                }}
+                                                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                                                  directSelected
+                                                    ? 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                                                }`}
+                                              >
+                                                {directSelected ? '移除' : configured ? '单独配置' : '添加'}
+                                              </button>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                    {visibleScopeMembers.length === 0 && (
+                                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 py-10 text-center text-sm text-slate-400">
+                                        当前筛选下暂无{partialMemberConfigFilter === 'configured' ? '已配置' : '未配置'}人员
+                                      </div>
+                                    )}
+                                  </section>
+                                )}
+                              </div>
                             </div>
+
+                            <aside className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+                              <div className="border-b border-slate-100 px-5 py-4">
+                                <div className="flex flex-wrap items-center justify-between gap-3">
+                                  <div>
+                                    <div className="text-sm font-bold text-slate-900">已选范围</div>
+                                    <div className="mt-1 text-xs text-slate-500">可按成员、部门、角色、权限筛选，筛选后支持批量剔除。</div>
+                                  </div>
+                                  <div className="flex items-center gap-2 text-xs">
+                                    <span className="rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">部门 {teamPermissions.length}</span>
+                                    <span className="rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">角色 {rolePermissions.length}</span>
+                                    <span className="rounded-full bg-blue-50 px-2.5 py-1 font-semibold text-blue-700">成员 {effectiveMembers.length}</span>
+                                  </div>
+                                </div>
+                                <div className="mt-4 grid gap-2 lg:grid-cols-[minmax(0,1fr)_120px_120px_110px]">
+                                  <div className="relative">
+                                    <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                                    <input
+                                      value={partialSelectedSearch}
+                                      onChange={(e) => setPartialSelectedSearch(e.target.value)}
+                                      placeholder="搜索姓名 / 部门 / 角色"
+                                      className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-xs outline-none focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-500/20"
+                                    />
+                                  </div>
+                                  <select
+                                    value={partialSelectedDepartmentFilter}
+                                    onChange={(e) => setPartialSelectedDepartmentFilter(e.target.value)}
+                                    className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-xs text-slate-600 outline-none focus:border-blue-500"
+                                  >
+                                    <option value="all">全部部门</option>
+                                    {departmentGroups.map(department => <option key={department.id} value={department.name}>{department.name}</option>)}
+                                  </select>
+                                  <select
+                                    value={partialSelectedRoleFilter}
+                                    onChange={(e) => setPartialSelectedRoleFilter(e.target.value)}
+                                    className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-xs text-slate-600 outline-none focus:border-blue-500"
+                                  >
+                                    <option value="all">全部角色</option>
+                                    {mockRoles.map(role => <option key={role.id} value={role.name}>{role.name}</option>)}
+                                  </select>
+                                  <select
+                                    value={partialSelectedPermissionFilter}
+                                    onChange={(e) => setPartialSelectedPermissionFilter(e.target.value as 'all' | 'view' | 'edit' | 'manage')}
+                                    className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-xs text-slate-600 outline-none focus:border-blue-500"
+                                  >
+                                    <option value="all">全部权限</option>
+                                    {permissionOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                                  </select>
+                                </div>
+                                <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                                  <button
+                                    onClick={() => {
+                                      setPartialSelectedSearch('');
+                                      setPartialSelectedDepartmentFilter('all');
+                                      setPartialSelectedRoleFilter('all');
+                                      setPartialSelectedPermissionFilter('all');
+                                    }}
+                                    className="text-xs font-semibold text-slate-500 transition hover:text-slate-800"
+                                  >
+                                    清空筛选
+                                  </button>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                      onClick={() => setSelectedPartialMemberIds(allVisibleSelected ? [] : visibleEffectiveMembers.map(member => member.id))}
+                                      className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                                    >
+                                      {allVisibleSelected ? '取消全选' : '全选当前'}
+                                    </button>
+                                    <button
+                                      onClick={() => removeMembersFromScope(selectedPartialMemberIds)}
+                                      className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50"
+                                    >
+                                      批量剔除
+                                    </button>
+                                    <button
+                                      onClick={() => removeMembersFromScope(visibleEffectiveMembers.map(member => member.id))}
+                                      className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700"
+                                    >
+                                      剔除筛选结果
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="max-h-[500px] overflow-y-auto p-4">
+                                {visibleEffectiveMembers.length > 0 ? (
+                                  <div className="space-y-2">
+                                    {visibleEffectiveMembers.map(member => {
+                                      const meta = memberMeta.get(member.id) || { departments: [], roles: [] };
+                                      const checked = selectedPartialMemberIds.includes(member.id);
+                                      return (
+                                        <div key={member.id} className={`rounded-xl border p-3 transition ${checked ? 'border-blue-200 bg-blue-50/40' : 'border-slate-200 bg-white hover:border-slate-300'}`}>
+                                          <div className="flex items-start gap-3">
+                                            <input
+                                              type="checkbox"
+                                              checked={checked}
+                                              onChange={() => setSelectedPartialMemberIds(prev => prev.includes(member.id) ? prev.filter(id => id !== member.id) : [...prev, member.id])}
+                                              className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600"
+                                            />
+                                            <div className="min-w-0 flex-1">
+                                              <div className="flex flex-wrap items-center gap-2">
+                                                <span className="font-semibold text-slate-900">{member.name}</span>
+                                                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${permissionTone[member.permission]}`}>{permissionText[member.permission]}</span>
+                                              </div>
+                                              <div className="mt-2 grid gap-2 text-xs text-slate-500 md:grid-cols-2">
+                                                <div>
+                                                  <span className="text-slate-400">角色：</span>
+                                                  {meta.roles.length ? meta.roles.join('、') : '无角色'}
+                                                </div>
+                                              </div>
+                                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                                {member.sources.map(source => (
+                                                  <span key={source} className="rounded-md bg-slate-50 px-2 py-1 text-[11px] text-slate-500 ring-1 ring-slate-200">{source}</span>
+                                                ))}
+                                              </div>
+                                            </div>
+                                            <button
+                                              onClick={() => removeMembersFromScope([member.id])}
+                                              className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50"
+                                            >
+                                              剔除
+                                            </button>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                ) : (
+                                  <div className="flex min-h-[260px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-center">
+                                    <Users className="mb-3 h-8 w-8 text-slate-300" />
+                                    <div className="text-sm font-semibold text-slate-600">暂无已选范围</div>
+                                    <p className="mt-1 max-w-[260px] text-xs leading-5 text-slate-400">从左侧批量添加部门或角色后，这里会显示最终可访问人员、来源和权限。</p>
+                                  </div>
+                                )}
+                              </div>
+                            </aside>
                           </div>
                         </div>
-                      </div>
-                    )}
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
@@ -6423,21 +8717,31 @@ export default function App() {
             // 文档详情页 - 三栏对照
             <div className="flex-1 flex flex-col h-full bg-white overflow-hidden">
               {(() => {
-                const chunkSource = [
-                  `「${selectedDocument.name}」${selectedDocument.summary || '前后端一体化方案当前背景。项目任务在推进：河南农商、江西农商、江南农商等。'}`,
-                  '当前背景：项目任务在推进，河南农商、江西农商、江南农商等项目需要在有限资源下持续交付，并保持交互、页面和流程的一致性。',
-                  '产品化方向未形成完整平台能力：当前没有现成 agent 平台，也没有自研 coding 工具，需要在项目推进中逐步沉淀可复用能力。',
-                  '资源有限：3.5 名产品、1 名前端、1 名后端（兼职和实习）共同支撑多个项目，需要把流程、模板、组件和交付标准前置。',
-                  '讨论目标一：形成方向共识，明确前后端一体化是什么、不是什么，避免把所有生成能力都混在同一个概念里。',
-                  '讨论目标二：明确演进路径，agent 平台、coding 工具、一体化能力分别如何从轻到重演进，并区分短期方案与长期平台能力。',
-                  '讨论目标三：确定实施策略，在项目并行推进、资源有限的情况下，优先跑通产品业务闭环，再逐步提升自动化程度。',
-                  '产品定义：面向企业的数字员工生成、运行、养成与治理平台，以自然语言作为入口，将业务目标转化为可运行、可优化、可考核的岗位 Agent。'
-                ];
-                const chunkTotal = Math.max(selectedDocument.chunkCount || 0, chunkSource.length);
-                const chunks = chunkSource.slice(0, Math.min(chunkTotal, chunkSource.length)).map((text, index) => ({
+                const isImageDetail = isImageDocument(selectedDocument);
+                const isAudioDetail = isAudioDocument(selectedDocument);
+                const imageAnalysis = isImageDetail ? getImageAnalysisResult(selectedDocument) : null;
+                const imageChunks = imageAnalysis?.chunks || [];
+                const activeImageChunk = imageChunks.find(chunk => chunk.id === activeImageChunkId) || imageChunks[0];
+                const filteredImageChunks = imageChunks.filter((chunk, index) => {
+                  const query = chunkSearchQuery.trim().toLowerCase();
+                  if (!query) return true;
+                  return [
+                    String(index + 1),
+                    chunk.title,
+                    getImageChunkTypeLabel(chunk.chunkType || chunk.type || ''),
+                    chunk.content
+                  ].filter(Boolean).some(value => String(value).toLowerCase().includes(query));
+                });
+                const audioSegments = isAudioDetail ? getAudioTranscriptSegments(selectedDocument) : [];
+                const chunkSource = selectedDocument.chunks?.length
+                  ? selectedDocument.chunks.map(chunk => chunk.content)
+                  : selectedDocument.content?.trim()
+                    ? [selectedDocument.content]
+                    : [];
+                const chunks = chunkSource.map((text, index) => ({
                   id: index + 1,
                   chars: (chunkEdits[index + 1] ?? text).length,
-                  type: '原文语句',
+                  type: selectedDocument.sliceRule || '原文切片',
                   text: chunkEdits[index + 1] ?? text,
                   enabled: chunkEnabledMap[index + 1] ?? true
                 }));
@@ -6458,15 +8762,100 @@ export default function App() {
                 const activeChunk = chunks.find(chunk => chunk.id === activeDocumentChunkId) || chunks[0];
                 const getOriginalChunkClass = (id: number) =>
                   activeChunk.id === id
-                    ? 'bg-blue-100 text-slate-950 ring-1 ring-blue-200 rounded px-1.5 py-0.5'
-                    : 'bg-transparent rounded px-1.5 py-0.5';
+                    ? 'border-blue-300 bg-blue-50/70 shadow-sm'
+                    : 'border-transparent bg-transparent';
+                const renderFormattedOriginalBlock = (text: string, index: number) => {
+                  const chunkId = index + 1;
+                  const lines = text.trim().split(/\r?\n/);
+                  const firstLine = lines[0]?.trim() || '';
+                  const tableLines = lines.filter(line => /^\s*\|.+\|\s*$/.test(line));
+                  if (tableLines.length >= 2) {
+                    const rows = tableLines
+                      .filter(line => !/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line))
+                      .map(line => line.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim()));
+                    const [header, ...body] = rows;
+                    return (
+                      <div data-chunk-id={chunkId} className={`rounded-xl border p-4 transition-all ${getOriginalChunkClass(chunkId)}`}>
+                        <div className="mb-3 text-xs font-semibold text-slate-400">表格片段 #{chunkId}</div>
+                        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+                          <table className="min-w-full divide-y divide-slate-200 text-sm">
+                            {header && (
+                              <thead className="bg-slate-50">
+                                <tr>{header.map((cell, cellIndex) => <th key={cellIndex} className="px-3 py-2 text-left font-semibold text-slate-700">{cell}</th>)}</tr>
+                              </thead>
+                            )}
+                            <tbody className="divide-y divide-slate-100">
+                              {body.map((row, rowIndex) => (
+                                <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex} className="px-3 py-2 text-slate-600">{cell}</td>)}</tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  }
+                  if (/^```/.test(firstLine)) {
+                    return (
+                      <pre data-chunk-id={chunkId} className={`overflow-x-auto rounded-xl border p-4 text-xs leading-6 text-slate-700 transition-all ${getOriginalChunkClass(chunkId)}`}>
+                        {text.replace(/^```[^\n]*\n?|\n?```$/g, '')}
+                      </pre>
+                    );
+                  }
+                  const heading = firstLine.match(/^(#{1,6})\s+(.+)/);
+                  const pageTitle = firstLine.match(/^---\s*(第\s*\d+\s*页|Slide\s*\d+|第\s*\d+\s*页)\s*---$/i);
+                  return (
+                    <section data-chunk-id={chunkId} className={`rounded-xl border p-4 transition-all ${getOriginalChunkClass(chunkId)}`}>
+                      {pageTitle && <div className="mb-3 rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-500">{pageTitle[1]}</div>}
+                      {heading ? (
+                        <>
+                          <h2 className={`${heading[1].length === 1 ? 'text-xl' : 'text-lg'} font-bold text-slate-950`}>{heading[2]}</h2>
+                          <div className="mt-3 space-y-2 text-sm leading-7 text-slate-700">
+                            {lines.slice(1).filter(Boolean).map((line, lineIndex) => {
+                              const listItem = line.match(/^\s*[-*]\s+(.+)/) || line.match(/^\s*\d+[.、]\s+(.+)/);
+                              return listItem
+                                ? <div key={lineIndex} className="flex gap-2"><span className="mt-3 h-1.5 w-1.5 rounded-full bg-blue-400" /><span>{listItem[1]}</span></div>
+                                : <p key={lineIndex}>{line}</p>;
+                            })}
+                          </div>
+                        </>
+                      ) : (
+                        <div className="space-y-2 text-sm leading-7 text-slate-700">
+                          {lines.filter(Boolean).map((line, lineIndex) => {
+                            const listItem = line.match(/^\s*[-*]\s+(.+)/) || line.match(/^\s*\d+[.、]\s+(.+)/);
+                            return listItem
+                              ? <div key={lineIndex} className="flex gap-2"><span className="mt-3 h-1.5 w-1.5 rounded-full bg-blue-400" /><span>{listItem[1]}</span></div>
+                              : <p key={lineIndex}>{line}</p>;
+                          })}
+                        </div>
+                      )}
+                    </section>
+                  );
+                };
+                const renderUploadedTextContent = () => {
+                  const source = selectedDocument.content?.trim() || '';
+                  if (!source) {
+                    return (
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-400">
+                        暂无可展示的原文内容
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="space-y-4">
+                      {chunks.map((chunk, index) => renderFormattedOriginalBlock(chunk.text, index))}
+                    </div>
+                  );
+                };
                 return (
                   <>
                     {/* 顶部导航栏 */}
                     <div className="h-[78px] bg-white border-b border-slate-200 px-8 flex items-center justify-between shrink-0">
                       <div className="flex items-center gap-5 min-w-0">
                         <button
-                          onClick={() => setSelectedDocument(null)}
+                          onClick={() => {
+                            setSelectedDocument(null);
+                            setShowDocumentChunks(false);
+                          }}
                           className="p-2 -ml-2 text-slate-500 hover:text-slate-800 hover:bg-slate-50 rounded-xl transition-colors"
                         >
                           <ChevronLeft className="w-5 h-5" />
@@ -6491,6 +8880,17 @@ export default function App() {
                           下载原文
                         </button>
                         <button
+                          onClick={() => setShowDocumentChunks(true)}
+                          className={`h-9 px-4 border rounded-lg text-sm font-semibold flex items-center gap-2 shadow-sm transition-colors ${
+                            showDocumentChunks
+                              ? 'border-blue-200 bg-blue-50 text-blue-600'
+                              : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-900'
+                          }`}
+                        >
+                          <FileStack className="w-4 h-4" />
+                          查看切片
+                        </button>
+                        <button
                           onClick={() => {
                             setEditingDoc(selectedDocument);
                             setShowDocConfigModal(true);
@@ -6503,53 +8903,204 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="flex-1 grid grid-cols-[38%_62%] overflow-hidden bg-white">
+                    <div className={`flex-1 grid ${showDocumentChunks ? 'grid-cols-[44%_56%]' : 'grid-cols-1'} overflow-hidden bg-white`}>
                       {/* 原文对照 */}
-                      <section className="border-r border-slate-200 flex flex-col overflow-hidden">
+                      <section className={`${showDocumentChunks ? 'border-r border-slate-200' : ''} flex flex-col overflow-hidden`}>
                         <div className="px-6 pt-6 pb-3 shrink-0">
-                          <h3 className="text-lg font-bold text-slate-900">原文对照</h3>
+                          <h3 className="text-lg font-bold text-slate-900">原文</h3>
                         </div>
                         <div className="mx-6 border-t border-slate-200" />
                         <div ref={originalTextScrollRef} className="flex-1 overflow-y-auto px-6 py-7 no-scrollbar">
-                          <div className="max-w-[520px] mx-auto text-slate-900 leading-relaxed">
-                            <h1 data-chunk-id={1} className={`inline text-lg font-bold ${getOriginalChunkClass(1)}`}>前后端一体化方案 1.0</h1>
-                            <div className="mt-5">
-                              <h2 className="inline text-base font-bold">当前背景</h2>
-                            </div>
-                            <div className="mt-3 space-y-3 text-sm">
-                              <p><span className="text-blue-600 font-semibold">1.</span> <span data-chunk-id={2} className={getOriginalChunkClass(2)}>项目任务在推进：河南农商、江西农商、江南农商等项目需要在有限资源下持续交付，并保持交互、页面和流程的一致性。</span></p>
-                              <p><span className="text-blue-600 font-semibold">2.</span> <span data-chunk-id={3} className={getOriginalChunkClass(3)}>产品化方向未形成完整平台能力：当前没有现成 agent 平台，也没有自研 coding 工具，需要在项目推进中逐步沉淠可复用能力。</span></p>
-                              <ul className="ml-6 space-y-2 text-xs list-disc marker:text-blue-500">
-                                <li><span data-chunk-id={4} className={getOriginalChunkClass(4)}>资源有限：3.5 名产品、1 名前端、1 名后端（属职和实习）共同支撑多个项目。</span></li>
-                              </ul>
-                            </div>
-                            <div className="mt-8 space-y-4 text-sm">
-                              <h2 className="inline text-base font-bold">讨论目标</h2>
-                              <p><span className="text-blue-600 font-semibold">1.</span> <span data-chunk-id={5} className={getOriginalChunkClass(5)}>形成方向共识，明确前后端一体化是什么、不是什么，避免把所有生成能力都混在同一个概念里。</span></p>
-                              <p><span className="text-blue-600 font-semibold">2.</span> <span data-chunk-id={6} className={getOriginalChunkClass(6)}>明确演进路径，agent 平台、coding 工具、一体化能力分别如何从轻到重演进。</span></p>
-                              <p><span className="text-blue-600 font-semibold">3.</span> <span data-chunk-id={7} className={getOriginalChunkClass(7)}>确定实施策略，在项目并行推进、资源有限的情况下，优先跑通产品业务闭环。</span></p>
-                            </div>
-                            <div className="mt-8 text-sm">
-                              <h2 className="inline text-base font-bold">产品定义（最终态）</h2>
-                              <p data-chunk-id={8} className={`mt-3 leading-7 ${getOriginalChunkClass(8)}`}>面向企业的数字员工生成、运行、养成与治理平台，以自然语言作为入口，将业务目标转化为可运行、可优化、可考核的岗位 Agent。</p>
-                            </div>
-                            <div className="mt-6 rounded-lg bg-slate-50 border border-slate-200 p-4 text-xs text-slate-500">
-                              <div className="mb-2 font-semibold text-slate-600">代码块</div>
-                              {['对话框', '任务卡片', '表单', '流程节点', '工作台', '详情页', '确认弹窗', '报告编辑页'].map((item, index) => (
-                                <div key={item} className="grid grid-cols-[24px_1fr] py-1"><span>{index + 1}</span><span>{item}</span></div>
-                              ))}
-                            </div>
+                          <div className={`${showDocumentChunks ? 'max-w-[520px]' : isAudioDetail ? 'max-w-6xl' : 'max-w-[760px]'} mx-auto text-slate-900 leading-relaxed`}>
+                            {isImageDetail ? (
+                              <div className="space-y-4">
+                                <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                                  <div>
+                                    <div className="text-sm font-semibold text-slate-800">图片类型判断</div>
+                                    <div className="mt-1 text-xs text-slate-500">
+                                      {imageAnalysis?.imageType === 'structured'
+                                        ? '按标题、字段和值、表格行、编号步骤和版块内容生成切片。'
+                                        : '根据可见对象识别和 OCR 生成整图描述；没有结果时保留原图，不补模板文案。'}
+                                    </div>
+                                  </div>
+                                  <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${
+                                    imageAnalysis?.imageType === 'structured'
+                                      ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-100'
+                                      : 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100'
+                                  }`}>
+                                    {imageAnalysis?.imageType === 'structured' ? '结构化图片' : '非结构化图片'}
+                                  </span>
+                                </div>
+                                <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
+                                  <div className="relative mx-auto aspect-[4/3] w-full max-w-[760px] bg-white">
+                                    {selectedDocument.previewUrl ? (
+                                      <img src={selectedDocument.previewUrl} alt={selectedDocument.name} className="h-full w-full object-contain" />
+                                    ) : (
+                                      <div className="flex h-full items-center justify-center bg-gradient-to-br from-orange-50 to-blue-50 text-slate-400">
+                                        <Image className="h-16 w-16" />
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            ) : isAudioDetail ? (
+                              <div className="flex min-h-full flex-col pb-28">
+                                <div className="mb-6">
+                                  <div className="flex flex-wrap items-center justify-between gap-3">
+                                    <div>
+                                      <h1 className="text-2xl font-semibold text-slate-950">{selectedDocument.name.replace(/\.[^.]+$/, '')}</h1>
+                                      <div className="mt-2 text-sm text-slate-400">ASR 转写结果 · 点击时间戳文本可定位到对应播放节点</div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <span className="rounded-full bg-pink-50 px-3 py-1 text-xs font-semibold text-pink-700 ring-1 ring-pink-100">音视频 ASR</span>
+                                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-500">{audioSegments.length} 个时间片段</span>
+                                    </div>
+                                  </div>
+                                </div>
+                                <audio
+                                  ref={audioPreviewRef}
+                                  src={selectedDocument.previewUrl}
+                                  className="hidden"
+                                  onLoadedMetadata={(event) => {
+                                    const duration = event.currentTarget.duration;
+                                    if (Number.isFinite(duration) && duration > 0) setAudioDuration(duration);
+                                  }}
+                                  onTimeUpdate={(event) => setAudioCurrentTime(event.currentTarget.currentTime)}
+                                  onPlay={() => setIsAudioPlaying(true)}
+                                  onPause={() => setIsAudioPlaying(false)}
+                                  onEnded={() => setIsAudioPlaying(false)}
+                                />
+                                <div className="space-y-12">
+                                  {audioSegments.length > 0 ? (
+                                    audioSegments.map((segment, index) => {
+                                      const segmentSeconds = getSecondsFromTimestamp(segment.time);
+                                      const nextSeconds = audioSegments[index + 1] ? getSecondsFromTimestamp(audioSegments[index + 1].time) : audioDuration;
+                                      const isActive = audioCurrentTime >= segmentSeconds && audioCurrentTime < nextSeconds;
+                                      return (
+                                        <button
+                                          key={`${segment.time}-${index}`}
+                                          type="button"
+                                          onClick={() => {
+                                            setActiveDocumentChunkId(index + 1);
+                                            setAudioCurrentTime(segmentSeconds);
+                                            if (audioPreviewRef.current) {
+                                              audioPreviewRef.current.currentTime = segmentSeconds;
+                                            }
+                                          }}
+                                          className={`grid w-full grid-cols-[86px_1fr] gap-6 rounded-2xl px-2 py-1 text-left transition-colors ${
+                                            isActive ? 'bg-emerald-50/70' : 'hover:bg-slate-50'
+                                          }`}
+                                        >
+                                          <span className={`pt-1 text-2xl font-medium ${isActive ? 'text-slate-900' : 'text-slate-400'}`}>{segment.time}</span>
+                                          <span className={`text-xl leading-10 transition-colors ${isActive ? 'text-emerald-700' : index > 2 ? 'text-slate-400' : 'text-slate-900'}`}>
+                                            {segment.text}
+                                          </span>
+                                        </button>
+                                      );
+                                    })
+                                  ) : (
+                                    <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-6 py-12 text-center">
+                                      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-white text-slate-500 shadow-sm">
+                                        <Video className="h-5 w-5" />
+                                      </div>
+                                      <div className="mt-4 text-base font-semibold text-slate-800">暂未生成转写文本</div>
+                                      <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-500">
+                                        {selectedDocument.asrMessage || '当前音视频没有识别到清晰语音内容。可以继续播放原文件，或重新上传更清晰、时长更短的音视频后再试。'}
+                                      </p>
+                                    </div>
+                                  )}
+                                </div>
+                                <div className={`fixed bottom-0 z-30 border-t border-slate-100 bg-white/95 px-10 py-5 shadow-[0_-12px_30px_-26px_rgba(15,23,42,0.45)] backdrop-blur ${
+                                  isSidebarCollapsed ? 'left-20' : 'left-64'
+                                } right-0`}>
+                                  <div className="mx-auto max-w-5xl">
+                                    <div className="mb-4 flex items-center justify-center gap-8">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const nextTime = Math.max(0, audioCurrentTime - 15);
+                                          setAudioCurrentTime(nextTime);
+                                          if (audioPreviewRef.current) audioPreviewRef.current.currentTime = nextTime;
+                                        }}
+                                        className="flex h-10 w-10 items-center justify-center rounded-full text-slate-700 hover:bg-slate-100"
+                                      >
+                                        <RotateCcw className="h-5 w-5" />
+                                        <span className="sr-only">后退 15 秒</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const audio = audioPreviewRef.current;
+                                          if (!audio) return;
+                                          if (audio.paused) {
+                                            void audio.play();
+                                          } else {
+                                            audio.pause();
+                                          }
+                                        }}
+                                        className="flex h-11 w-11 items-center justify-center rounded-full bg-slate-900 text-white shadow-sm hover:bg-slate-800"
+                                      >
+                                        {isAudioPlaying ? <Pause className="h-5 w-5 fill-current" /> : <Play className="ml-0.5 h-5 w-5 fill-current" />}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const nextTime = Math.min(audioDuration, audioCurrentTime + 15);
+                                          setAudioCurrentTime(nextTime);
+                                          if (audioPreviewRef.current) audioPreviewRef.current.currentTime = nextTime;
+                                        }}
+                                        className="flex h-10 w-10 items-center justify-center rounded-full text-slate-700 hover:bg-slate-100"
+                                      >
+                                        <RotateCw className="h-5 w-5" />
+                                        <span className="sr-only">前进 15 秒</span>
+                                      </button>
+                                    </div>
+                                    <input
+                                      type="range"
+                                      min={0}
+                                      max={Math.max(audioDuration, 1)}
+                                      step={1}
+                                      value={Math.min(audioCurrentTime, audioDuration)}
+                                      onChange={(event) => {
+                                        const nextTime = Number(event.target.value);
+                                        setAudioCurrentTime(nextTime);
+                                        if (audioPreviewRef.current) audioPreviewRef.current.currentTime = nextTime;
+                                      }}
+                                      className="w-full accent-slate-400"
+                                    />
+                                    <div className="mt-2 flex items-center justify-between text-sm text-slate-500">
+                                      <span>{formatPlaybackTime(audioCurrentTime)}</span>
+                                      <span>{formatPlaybackTime(audioDuration)}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            ) : (
+                              renderUploadedTextContent()
+                            )}
                           </div>
                         </div>
                       </section>
 
                       {/* 切片信息 */}
-                      <section className="border-r border-slate-200 flex flex-col overflow-hidden">
+                      {showDocumentChunks && (
+                      <section className="flex flex-col overflow-hidden">
                         <div className="px-6 pt-6 pb-0 shrink-0">
                           <div className="flex items-center justify-between gap-4">
-                            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                              切片信息
-                            </h3>
+                            <div className="flex items-center gap-3">
+                              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                切片信息
+                              </h3>
+                              <button
+                                type="button"
+                                onClick={() => setShowDocumentChunks(false)}
+                                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-500 transition-all hover:bg-slate-50 hover:text-slate-700"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                                关闭
+                              </button>
+                            </div>
+                            {!isAudioDetail && (
                             <div className="flex items-center gap-2">
                               <div className="relative">
                                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -6569,6 +9120,7 @@ export default function App() {
                                   </button>
                                 )}
                               </div>
+                              {!isImageDetail && (
                               <div className="relative">
                                 <select
                                   value={chunkStatusFilter}
@@ -6581,10 +9133,79 @@ export default function App() {
                                 </select>
                                 <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                               </div>
+                              )}
                             </div>
+                            )}
                           </div>
                         </div>
                         <div className="flex-1 overflow-y-auto px-6 py-4 no-scrollbar space-y-3">
+                          {isAudioDetail ? (
+                            <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-5 py-8">
+                              <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full bg-white text-slate-500 shadow-sm">
+                                <Scissors className="h-5 w-5" />
+                              </div>
+                              <div className="mt-4 text-center">
+                                <div className="text-sm font-semibold text-slate-800">音视频切片规则暂未配置</div>
+                                <p className="mt-2 text-sm leading-6 text-slate-500">
+                                  当前详情页已展示上传音视频对应的 ASR 转写原文、时间戳和播放器定位；后续配置音视频切片策略后，这里会展示按规则生成的切片结果。
+                                </p>
+                              </div>
+                              <div className="mt-5 grid gap-2 rounded-lg bg-white p-3 text-xs leading-5 text-slate-500">
+                                <div>已完成：时间顺序转写文本</div>
+                                <div>已完成：点击原文定位播放时间</div>
+                                <div>待配置：音视频切片策略与切片预览</div>
+                              </div>
+                            </div>
+                          ) : isImageDetail ? (
+                            <div className="space-y-3">
+                              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
+                                {imageAnalysis?.imageType === 'structured'
+                                  ? '结构化图片按语义切分：标题、字段和值、表格行、编号步骤和独立版块会分别成片，避免把整张图识别成一大段。'
+                                  : '非结构化图片按整图描述、主要对象/场景和可见文字成片，只描述图片中能识别到的内容。'}
+                              </div>
+                              {filteredImageChunks.length === 0 && (
+                                <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-400">
+                                  暂无匹配的图片切片
+                                </div>
+                              )}
+                              {filteredImageChunks.map((chunk, index) => {
+                                const isActive = activeImageChunk?.id === chunk.id;
+                                const typeLabel = getImageChunkTypeLabel(chunk.chunkType || chunk.type || '');
+                                const tone =
+                                  chunk.chunkType === 'image_description' || chunk.chunkType?.includes('summary')
+                                    ? 'bg-violet-50 text-violet-700'
+                                    : chunk.chunkType === 'kv_field' || chunk.chunkType === 'table_header' || chunk.chunkType === 'ocr_text'
+                                      ? 'bg-sky-50 text-sky-700'
+                                      : chunk.chunkType === 'object' || chunk.chunkType === 'area' || chunk.chunkType === 'state'
+                                        ? 'bg-emerald-50 text-emerald-700'
+                                        : chunk.chunkType === 'relation' || chunk.chunkType === 'node_group' || chunk.chunkType === 'hierarchy'
+                                          ? 'bg-amber-50 text-amber-700'
+                                          : 'bg-blue-50 text-blue-700';
+                                return (
+                                  <button
+                                    key={chunk.id || index}
+                                    type="button"
+                                    onClick={() => setActiveImageChunkId(chunk.id)}
+                                    className={`w-full rounded-xl border p-4 text-left transition-all ${
+                                      isActive
+                                        ? 'border-slate-400 bg-slate-50 shadow-sm'
+                                        : 'border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50'
+                                    }`}
+                                  >
+                                    <div className="mb-3 flex items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <div className={`text-xs font-bold ${isActive ? 'text-slate-600' : 'text-slate-400'}`}>#{index + 1}</div>
+                                        <div className="mt-1 text-base font-semibold text-slate-900">{chunk.title || typeLabel}</div>
+                                      </div>
+                                      <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${tone}`}>{typeLabel}</span>
+                                    </div>
+                                    <p className="whitespace-pre-wrap text-sm leading-7 text-slate-700">{chunk.content}</p>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <>
                           {filteredChunks.length === 0 && (
                             <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-400">
                               暂无符合当前状态的切片
@@ -6654,8 +9275,11 @@ export default function App() {
                               </div>
                             );
                           })}
+                            </>
+                          )}
                         </div>
                       </section>
+                      )}
                     </div>
                   </>
                 );
@@ -6667,11 +9291,7 @@ export default function App() {
               {/* 顶部步骤进度条 */}
               <div className="bg-white border-b border-slate-200 px-8 py-5 shrink-0">
                 <div className="flex items-center justify-center">
-                  {[
-                    { num: 1, label: '上传文件' },
-	                    { num: 2, label: '规则配置' },
-                    { num: 3, label: '文件处理' },
-                  ].map((step, idx) => (
+                  {uploadStepItems.map((step, idx) => (
                     <div key={step.num} className="flex items-center">
                       {idx > 0 && <div className="w-16 h-px bg-slate-300 mx-5" />}
                       <div className="flex items-center gap-2.5">
@@ -6682,7 +9302,7 @@ export default function App() {
                             ? 'bg-green-500 text-white'
                             : 'border border-slate-300 text-slate-400 bg-white'
                         }`}>
-                          STEP {step.num}
+                          STEP {step.displayNum ?? step.num}
                         </div>
                         <span className={`text-sm ${
                           fileUploadStep === step.num ? 'font-semibold text-slate-800' : 'font-medium text-slate-400'
@@ -6703,18 +9323,17 @@ export default function App() {
                     <div className="flex items-center gap-2 mb-4">
                       <label className="text-sm font-semibold text-slate-700">选择文件类型</label>
                     </div>
-                    <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+                    <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
                       {[
                         { value: 'text', title: '导入文本文档', desc: '本地上传文档', icon: FileText, bg: 'bg-blue-50', color: 'text-blue-600' },
                         { value: 'table', title: '导入表格型知识', desc: '表格结构化知识', icon: Layout, bg: 'bg-emerald-50', color: 'text-emerald-600' },
-                        { value: 'web', title: '读取网页数据', desc: '单个网页链接', icon: Globe, bg: 'bg-violet-50', color: 'text-violet-600' },
                         { value: 'image', title: '导入图片文件', desc: '图片内容识别', icon: Image, bg: 'bg-orange-50', color: 'text-orange-600' },
                         { value: 'audio', title: '导入音频文件', desc: '语音转写入库', icon: Video, bg: 'bg-pink-50', color: 'text-pink-600' },
-                        { value: 'api', title: '数据库 / API', desc: '接口数据接入', icon: Database, bg: 'bg-cyan-50', color: 'text-cyan-600' }
+                        { value: 'web', title: '读取网页数据', desc: '单个网页链接', icon: Globe, bg: 'bg-violet-50', color: 'text-violet-600' }
                       ].map((item) => (
                         <button
                           key={item.value}
-                          onClick={() => setFileUploadFileType(item.value as typeof fileUploadFileType)}
+                          onClick={() => applyFileUploadType(item.value as typeof fileUploadFileType)}
                           className={`relative rounded-lg border px-3 py-3 text-left transition-all ${
                             fileUploadFileType === item.value
                               ? 'border-blue-500 bg-blue-50 shadow-sm'
@@ -6739,10 +9358,10 @@ export default function App() {
                   {/* 导入来源 */}
                   <div>
                     <label className="text-sm font-semibold text-slate-700 mb-3 block">
-                      {fileUploadFileType === 'web' ? '网页上传方式' : fileUploadFileType === 'api' ? '连接配置表单' : fileUploadFileType === 'table' ? '上传表格区' : fileUploadFileType === 'image' ? '上传图片区' : fileUploadFileType === 'audio' ? '上传音频区' : '上传文件区'}
+                      {fileUploadFileType === 'web' ? '网页上传方式' : fileUploadFileType === 'table' ? '上传表格区' : fileUploadFileType === 'image' ? '上传图片区' : fileUploadFileType === 'audio' ? '上传音频区' : '上传文件区'}
                     </label>
 
-                    {fileUploadFileType !== 'web' && fileUploadFileType !== 'api' && (
+                    {fileUploadFileType !== 'web' && (
                       <label
                         className="block border-2 border-dashed border-blue-300 rounded-2xl p-12 text-center hover:border-blue-500 hover:bg-blue-50/20 transition-all cursor-pointer"
                         onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('border-blue-500', 'bg-blue-50/30'); }}
@@ -6751,17 +9370,18 @@ export default function App() {
                           e.preventDefault();
                           e.currentTarget.classList.remove('border-blue-500', 'bg-blue-50/30');
                           const files = Array.from(e.dataTransfer.files) as File[];
-                          handleFileUpload(files);
+                          void handleFileUpload(files);
                         }}
                       >
                         <input
                           type="file"
                           multiple
-                          accept={fileUploadFileType === 'table' ? '.xlsx,.xls,.csv,.json' : fileUploadFileType === 'image' ? '.png,.jpg,.jpeg,.bmp' : fileUploadFileType === 'audio' ? '.wav,.mp3,.m4a,.amr' : '.doc,.txt,.docx,.pdf,.ppt,.pptx,.md'}
+                          accept={fileUploadFileType === 'table' ? '.xlsx,.xls,.csv,.json' : fileUploadFileType === 'image' ? '.png,.jpg,.jpeg,.bmp' : fileUploadFileType === 'audio' ? '.wav,.mp3,.m4a,.amr,.mp4,.mov,.avi' : '.doc,.txt,.docx,.pdf,.ppt,.pptx,.md'}
                           className="hidden"
                           onChange={(e) => {
                             const files = Array.from(e.target.files || []) as File[];
-                            handleFileUpload(files);
+                            e.currentTarget.value = '';
+                            void handleFileUpload(files);
                           }}
                         />
                         <Upload className="w-14 h-14 text-blue-500 mx-auto mb-4" />
@@ -6771,7 +9391,7 @@ export default function App() {
                         <p className="text-xs text-slate-400 mt-3 leading-relaxed max-w-[560px] mx-auto">
                           {fileUploadFileType === 'table' && '支持 .xlsx / .xls / .csv / .json 文件格式，单个文件不超过 100MB。'}
                           {fileUploadFileType === 'image' && '支持 .png / .jpg / .jpeg / .bmp 文件格式，可识别图片中文字内容。'}
-                          {fileUploadFileType === 'audio' && '支持 .wav / .mp3 / .m4a / .amr 文件格式，单个音频文件不超过 1GB。'}
+                          {fileUploadFileType === 'audio' && '支持 .wav / .mp3 / .m4a / .amr / .mp4 / .mov / .avi 文件格式，单个音视频文件不超过 1GB。'}
                           {fileUploadFileType === 'text' && '单次上传文档数量为100个；支持.doc/.txt/.docx/.pdf/.ppt/.pptx/.md七种格式。'}
                         </p>
                       </label>
@@ -6804,15 +9424,14 @@ export default function App() {
                                 className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                               />
                               <button
-                                onClick={() => {
+                                onClick={async () => {
                                   const url = webUploadUrl.trim();
                                   if (!url) {
                                     showToast('warning', '请输入网页链接');
                                     return;
                                   }
-                                  setWebAddedUrls([{ id: `url-${Date.now()}`, url }]);
+                                  await createWebFileFromUrl(url);
                                   setWebUploadUrl('');
-                                  showToast('success', '链接已添加');
                                 }}
                                 className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition-all hover:bg-blue-700"
                               >
@@ -6821,7 +9440,20 @@ export default function App() {
                             </div>
                             {webAddedUrls.length > 0 && (
                               <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-700">
-                                已添加：{webAddedUrls[0].url}
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="truncate">已添加：{webAddedUrls[0].url}</div>
+                                    <div className="mt-1 text-xs text-blue-500">
+                                      {webAddedUrls[0].status === 'fetching' && '正在抓取网页正文...'}
+                                      {webAddedUrls[0].status === 'success' && '网页正文已抓取，可进入下一步预览切片。'}
+                                      {webAddedUrls[0].status === 'fallback' && '当前环境无法直接读取网页，已生成可预览的网页正文。'}
+                                      {webAddedUrls[0].status === 'error' && '网页抓取失败，请更换链接。'}
+                                    </div>
+                                  </div>
+                                  <span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-xs font-medium text-blue-600">
+                                    {uploadingFiles.find(file => file.id === webAddedUrls[0].id)?.status === 'success' ? '可处理' : '处理中'}
+                                  </span>
+                                </div>
                               </div>
                             )}
                           </div>
@@ -6877,23 +9509,6 @@ export default function App() {
                       </div>
                     )}
 
-                    {fileUploadFileType === 'api' && (
-                      <div className="rounded-2xl border border-slate-200 bg-white p-5">
-                        <div className="grid gap-4 md:grid-cols-2">
-                          <input value={apiConnectionForm.name} onChange={(e) => setApiConnectionForm(prev => ({ ...prev, name: e.target.value }))} placeholder="API 名称" className="rounded-xl border border-slate-200 px-4 py-3 text-sm" />
-                          <input value={apiConnectionForm.endpoint} onChange={(e) => setApiConnectionForm(prev => ({ ...prev, endpoint: e.target.value }))} placeholder="接口地址，例如 https://api.example.com/data" className="rounded-xl border border-slate-200 px-4 py-3 text-sm" />
-                          <input value={apiConnectionForm.token} onChange={(e) => setApiConnectionForm(prev => ({ ...prev, token: e.target.value }))} placeholder="Access Token" className="rounded-xl border border-slate-200 px-4 py-3 text-sm" />
-                          <select value={apiConnectionForm.method} onChange={(e) => setApiConnectionForm(prev => ({ ...prev, method: e.target.value }))} className="rounded-xl border border-slate-200 px-4 py-3 text-sm">
-                            <option value="GET">GET</option>
-                            <option value="POST">POST</option>
-                          </select>
-                        </div>
-                        <div className="mt-4 flex justify-end gap-3">
-                          <button onClick={() => showToast('success', '连接测试通过')} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600 hover:bg-slate-50">测试连接</button>
-                          <button onClick={() => showToast('success', '数据结构已获取')} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">获取数据结构</button>
-                        </div>
-                      </div>
-                    )}
                   </div>
 
                   {/* 文件列表 */}
@@ -6936,12 +9551,21 @@ export default function App() {
 	                          )}
                         </div>
                         {/* 文件行列表 */}
-                        <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100">
+                        <div className="border border-slate-200 rounded-xl overflow-visible divide-y divide-slate-100">
                           {pagedFiles.map((file) => {
                             const fi = getFileIcon(file.name);
                             const isErr = file.status === 'error';
+                            const problemReason = file.problemReason || '文件解析异常，请移除后重新上传。';
+                            const audioSegments = file.sourceType === 'audio'
+                              ? getAudioTranscriptSegments({
+                                  name: file.name,
+                                  content: file.content,
+                                  asrText: file.asrText,
+                                  asrSegments: file.asrSegments
+                                })
+                              : [];
                             return (
-                              <div key={file.id} className={`flex items-center gap-3 px-4 py-3 ${
+                              <div key={file.id} className={`group relative flex items-center gap-3 px-4 py-3 ${
                                 isErr ? 'bg-red-50' : 'bg-white hover:bg-slate-50'
                               }`}>
                                 <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${fi.bg}`}>
@@ -6949,7 +9573,54 @@ export default function App() {
                                 </div>
                                 <span className={`flex-1 text-sm truncate ${isErr ? 'text-red-600 font-medium' : 'text-slate-800'}`}>
                                   {file.name}
-                                </span>
+                                  </span>
+                                  {file.parseNote && (
+                                    <span className="hidden max-w-[280px] truncate text-xs text-slate-400 xl:inline">
+                                    {file.parseNote}
+                                  </span>
+                                  )}
+                                {isErr && (
+                                  <div className="group relative shrink-0">
+                                    <span className="inline-flex cursor-default items-center gap-1 rounded-full border border-red-200 bg-white px-2.5 py-1 text-xs font-semibold text-red-600">
+                                      <AlertTriangle className="h-3.5 w-3.5" />
+                                      问题文件
+                                    </span>
+                                    <div className="pointer-events-none invisible absolute bottom-full right-0 z-40 mb-2 w-72 rounded-lg border border-red-100 bg-white p-3 text-left text-xs leading-5 text-slate-700 opacity-0 shadow-xl transition-all group-hover:visible group-hover:opacity-100">
+                                      <div className="mb-1 font-semibold text-red-600">问题原因（仅查看）</div>
+                                      <div>{problemReason}</div>
+                                    </div>
+                                  </div>
+                                )}
+                                {!isErr && file.sourceType === 'audio' && (
+                                  <div className="flex shrink-0 items-center gap-2">
+                                    <span
+                                      title={file.asrMessage}
+                                      className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                        file.asrStatus === 'ready' && audioSegments.length > 0
+                                          ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100'
+                                          : file.asrStatus === 'processing'
+                                            ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-100'
+                                            : 'bg-red-50 text-red-600 ring-1 ring-red-100'
+                                      }`}
+                                    >
+                                      {file.asrStatus === 'ready' && audioSegments.length > 0
+                                        ? `ASR 已转写 ${audioSegments.length} 段`
+                                        : file.asrStatus === 'processing'
+                                          ? 'ASR 转写中'
+                                          : file.asrMessage || 'ASR 未生成文本'}
+                                    </span>
+                                    {file.asrStatus !== 'ready' && file.asrStatus !== 'processing' && file.rawFile && (
+                                      <button
+                                        type="button"
+                                        onClick={() => retryAudioTranscription(file.id)}
+                                        className="inline-flex items-center gap-1 rounded-lg border border-blue-100 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 transition-colors hover:bg-blue-100"
+                                      >
+                                        <RotateCcw className="h-3.5 w-3.5" />
+                                        重新转写
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
                                 {file.status === 'uploading' && (
                                   <div className="flex items-center gap-2 shrink-0">
                                     <div className="w-24 bg-slate-200 rounded-full h-1.5">
@@ -6976,6 +9647,11 @@ export default function App() {
                             );
                           })}
                         </div>
+                        {fileUploadFileType === 'audio' && uploadingFiles.some(file => file.sourceType === 'audio' && file.status === 'success' && !isAudioUploadReady(file)) && (
+                          <div className="mt-3 rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-700">
+                            音视频需要完成真实 ASR 转写后才能继续入库。当前本地 ASR 服务已支持 mp3 / wav / m4a / mp4 等格式；如果某个文件失败，请先点击“重新转写”，仍失败时再检查音频是否有人声或文件是否损坏。
+                          </div>
+                        )}
                         {/* 分页 */}
                         {totalPages > 1 && (
                           <div className="flex items-center justify-center gap-1 mt-4">
@@ -7021,113 +9697,912 @@ export default function App() {
 
                   {/* 左侧：分段设置 */}
                   <div className="w-[480px] shrink-0 overflow-y-auto">
-                    {/* 通用模式卡片 */}
-	                    <div className="border border-slate-200 bg-white rounded-xl p-5 space-y-5">
-	                      <div className="flex items-start gap-3">
-	                        <div className="w-9 h-9 bg-slate-100 rounded-lg flex items-center justify-center shrink-0">
-		                          <Scissors className="w-5 h-5 text-slate-600" />
+                    <div className="border border-slate-200 bg-white rounded-xl p-5">
+                      <div className="flex items-start gap-3">
+                        <div className="w-9 h-9 bg-blue-50 rounded-lg flex items-center justify-center shrink-0 text-blue-600">
+                          {(() => {
+                            const UploadIcon = selectedStep2UploadType.icon;
+                            return <UploadIcon className="w-5 h-5" />;
+                          })()}
                         </div>
                         <div>
-	                          <div className="text-sm font-semibold text-slate-800">分段设置</div>
-                          <div className="text-xs text-slate-500 mt-0.5">通用文本分块模式，检索和召回的块是相同的</div>
+                          <div className="text-sm font-semibold text-slate-800">{selectedStep2UploadType.title}</div>
+                          <div className="text-xs text-slate-500 mt-0.5">{selectedStep2UploadType.desc}</div>
                         </div>
                       </div>
+                    </div>
 
-                      {/* 参数配置 */}
-                      <div className="grid grid-cols-3 gap-3">
-                        <div>
-                          <div className="flex items-center gap-1.5 mb-2">
-                            <label className="text-xs font-medium text-slate-600">分段标识符</label>
-                            <span className="relative group cursor-help">
-                              <span className="text-slate-400 text-xs w-4 h-4 rounded-full border border-slate-300 inline-flex items-center justify-center hover:border-blue-400 hover:text-blue-500 transition-colors">?</span>
-                              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-50 w-72 pointer-events-none">
-                                <div className="bg-slate-800 text-white text-xs rounded-xl p-3.5 leading-relaxed shadow-xl">
-                                  {'分隔符是用于分隔文本的字符。\\n\\n 和 \\n 是常用于分隔段落和行的分隔符。用逗号连接分隔符（\\n\\n,\\n），当段落超过最大块长度时，会按行进行分割。你也可以使用自定义的特殊分隔符（例如 ***）。'}
-                                  <div className="absolute top-full left-1/2 -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-slate-800"></div>
+                    {isStep2GenericSliceType && (
+                      <>
+                        {fileUploadFileType === 'audio' && (
+                          <div className="mt-5 border border-slate-200 bg-white rounded-xl p-5 space-y-5">
+                            <div className="flex items-start gap-3">
+                              <div className="w-9 h-9 bg-pink-50 rounded-lg flex items-center justify-center shrink-0">
+                                <Video className="w-5 h-5 text-pink-600" />
+                              </div>
+                              <div>
+                                <div className="text-sm font-semibold text-slate-800">音频解析配置</div>
+                                <div className="text-xs text-slate-500 mt-0.5">配置如何通过语音识别（ASR）将音频文件转换为文本，并进行基础清洗。</div>
+                              </div>
+                            </div>
+
+                            <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <div className="text-sm font-semibold text-slate-800">解析方式</div>
+                                  <div className="mt-1 text-xs leading-5 text-slate-500">决定音频转写后的文本组织方式。</div>
+                                </div>
+                                <span className="shrink-0 whitespace-nowrap rounded-full bg-pink-50 px-3 py-1 text-[11px] font-semibold leading-none text-pink-700 ring-1 ring-pink-100">Parsing Mode</span>
+                              </div>
+                              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                                {[
+                                  { value: 'full', title: '整段识别', desc: '将整个音频文件转写为一整段连续文本，适合会议录音、讲座。', recommended: true },
+                                  { value: 'sentence', title: '分句识别', desc: '根据静音停顿自动切分成多个短句，适合访谈、对话。' }
+                                ].map((option) => (
+                                  <button
+                                    key={option.value}
+                                    type="button"
+                                    onClick={() => setStep2AudioParseConfig(prev => ({ ...prev, parseMode: option.value }))}
+                                    className={`min-h-[118px] rounded-xl border p-3 text-left transition-all ${
+                                      step2AudioParseConfig.parseMode === option.value
+                                        ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                        : 'border-slate-200 bg-white hover:border-blue-200'
+                                    }`}
+                                  >
+                                    <div className="flex items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        {renderRecommendedTitle(option.title, option.recommended)}
+                                      </div>
+                                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                        step2AudioParseConfig.parseMode === option.value
+                                          ? 'border-blue-600 bg-blue-600'
+                                          : 'border-slate-300 bg-white'
+                                      }`}>
+                                        {step2AudioParseConfig.parseMode === option.value && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                      </span>
+                                    </div>
+                                    <p className="mt-2 text-xs leading-5 text-slate-500">{option.desc}</p>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <div className="text-sm font-semibold text-slate-800">ASR 识别配置</div>
+                                  <div className="mt-1 text-xs leading-5 text-slate-500">调整语音转文字的参数，提升识别准确率。</div>
+                                </div>
+                                <span className="shrink-0 whitespace-nowrap rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold leading-none text-slate-600">ASR Configuration</span>
+                              </div>
+
+                              <div className="mt-4">
+                                <div className="mb-2 text-sm font-medium text-slate-700">识别语言</div>
+                                <div className="grid gap-2">
+                                  {[
+                                  { value: 'auto', title: '自动识别', desc: '系统自动判断语种。', recommended: true },
+                                  { value: 'zh', title: '中文', desc: '强制按中文识别。' },
+                                  { value: 'en', title: '英文', desc: '强制按英文识别。' }
+                                ].map((option) => (
+                                  <button
+                                    key={option.value}
+                                    type="button"
+                                    onClick={() => setStep2AudioParseConfig(prev => ({ ...prev, languageMode: option.value }))}
+                                      className={`flex items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                        step2AudioParseConfig.languageMode === option.value
+                                          ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                          : 'border-slate-200 bg-white hover:border-blue-200'
+                                      }`}
+                                    >
+                                      <div className="min-w-0">
+                                        {renderRecommendedTitle(option.title, option.recommended)}
+                                        <p className="mt-1 text-xs leading-5 text-slate-500">{option.desc}</p>
+                                      </div>
+                                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                        step2AudioParseConfig.languageMode === option.value
+                                          ? 'border-blue-600 bg-blue-600'
+                                          : 'border-slate-300 bg-white'
+                                      }`}>
+                                        {step2AudioParseConfig.languageMode === option.value && (
+                                          <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                                        )}
+                                      </span>
+                                    </button>
+                                  ))}
                                 </div>
                               </div>
-                            </span>
-                          </div>
-                          <input
-                            type="text"
-                            value={step2Separator}
-                            onChange={(e) => setStep2Separator(e.target.value)}
-                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-mono text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
-                          />
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-1.5 mb-2">
-                            <label className="text-xs font-medium text-slate-600">分段最大长度</label>
-                          </div>
-                          <div className="flex items-center border border-slate-200 rounded-lg overflow-hidden bg-white">
-                            <input
-                              type="number"
-                              value={step2MaxLength}
-                              onChange={(e) => setStep2MaxLength(parseInt(e.target.value) || 1024)}
-                              className="flex-1 px-2 py-2 text-sm text-slate-700 focus:outline-none min-w-0 bg-white"
-                            />
-                            <div className="flex flex-col border-l border-slate-200">
-                              <button onClick={() => setStep2MaxLength(v => v + 1)} className="px-1.5 py-0.5 hover:bg-slate-50 text-slate-400 text-xs">▲</button>
-                              <button onClick={() => setStep2MaxLength(v => Math.max(1, v - 1))} className="px-1.5 py-0.5 hover:bg-slate-50 text-slate-400 text-xs border-t border-slate-200">▼</button>
-                            </div>
-                            <span className="px-1.5 text-xs text-slate-400 border-l border-slate-200 py-2 bg-slate-50 shrink-0">chars</span>
-                          </div>
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-1.5 mb-2">
-                            <label className="text-xs font-medium text-slate-600">分段重叠长度</label>
-                            <span className="relative group cursor-help">
-                              <span className="text-slate-400 text-xs w-4 h-4 rounded-full border border-slate-300 inline-flex items-center justify-center hover:border-blue-400 hover:text-blue-500 transition-colors">?</span>
-                              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-50 w-72 pointer-events-none">
-                                <div className="bg-slate-800 text-white text-xs rounded-xl p-3.5 leading-relaxed shadow-xl">
-                                  设置分段之间的重叠长度可以保留分段之间的语义关系，提升召回效果。建议设置为最大分段长度的 10%–25%。
-                                  <div className="absolute top-full left-1/2 -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-slate-800"></div>
+
+                              <div className="mt-4">
+                                <div className="mb-2 text-sm font-medium text-slate-700">降噪增强</div>
+                                <div className="rounded-xl border border-blue-200 bg-blue-50 p-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => setStep2AudioParseConfig(prev => ({ ...prev, noiseReduction: !prev.noiseReduction }))}
+                                    className="flex w-full cursor-pointer items-start justify-between gap-3 text-left"
+                                  >
+                                    <span className="min-w-0">
+                                      <span className="block text-sm font-semibold text-slate-900">开启降噪增强</span>
+                                      <span className="mt-1 block text-xs leading-5 text-slate-500">去除背景杂音、电流声，提高人声清晰度。</span>
+                                    </span>
+                                    <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                      step2AudioParseConfig.noiseReduction ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                                    }`}>
+                                      {step2AudioParseConfig.noiseReduction && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                    </span>
+                                  </button>
                                 </div>
                               </div>
-                            </span>
-                          </div>
-                          <div className="flex items-center border border-slate-200 rounded-lg overflow-hidden bg-white">
-                            <input
-                              type="number"
-                              value={step2Overlap}
-                              onChange={(e) => setStep2Overlap(parseInt(e.target.value) || 0)}
-                              className="flex-1 px-2 py-2 text-sm text-slate-700 focus:outline-none min-w-0 bg-white"
-                            />
-                            <div className="flex flex-col border-l border-slate-200">
-                              <button onClick={() => setStep2Overlap(v => v + 1)} className="px-1.5 py-0.5 hover:bg-slate-50 text-slate-400 text-xs">▲</button>
-                              <button onClick={() => setStep2Overlap(v => Math.max(0, v - 1))} className="px-1.5 py-0.5 hover:bg-slate-50 text-slate-400 text-xs border-t border-slate-200">▼</button>
                             </div>
-                            <span className="px-1.5 text-xs text-slate-400 border-l border-slate-200 py-2 bg-slate-50 shrink-0">chars</span>
+                          </div>
+                        )}
+
+                        {fileUploadFileType === 'web' && (
+                          <div className="mt-5 border border-slate-200 bg-white rounded-xl p-5 space-y-5">
+                            <div className="flex items-start gap-3">
+                              <div className="w-9 h-9 bg-violet-50 rounded-lg flex items-center justify-center shrink-0">
+                                <Globe className="w-5 h-5 text-violet-600" />
+                              </div>
+                              <div>
+                                <div className="text-sm font-semibold text-slate-800">网页解析配置</div>
+                                <div className="text-xs text-slate-500 mt-0.5">配置网页内容的抓取与正文提取方式。提取出的正文将进入统一的文本预处理流程。</div>
+                              </div>
+                            </div>
+
+                            <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <div className="text-sm font-semibold text-slate-800">解析方式</div>
+                                  <div className="mt-1 text-xs leading-5 text-slate-500">选择网页文本提取范围，决定进入后续预处理的正文内容。</div>
+                                </div>
+                                <span className="shrink-0 whitespace-nowrap rounded-full bg-violet-50 px-3 py-1 text-[11px] font-semibold leading-none text-violet-700 ring-1 ring-violet-100">Parsing Mode</span>
+                              </div>
+                              <div className="mt-4 grid gap-2">
+                                {[
+                                  { value: 'main', title: '自动提取正文', desc: '自动识别网页中的正文区域，过滤导航、广告、版权等信息。', recommended: true },
+                                  { value: 'all', title: '提取全部文字', desc: '去除网页标签后，保留页面中所有文字内容。' }
+                                ].map((option) => (
+                                  <button
+                                    key={option.value}
+                                    type="button"
+                                    onClick={() => setStep2WebParseConfig(prev => ({ ...prev, parseMode: option.value }))}
+                                    className={`flex items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                      step2WebParseConfig.parseMode === option.value
+                                        ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                        : 'border-slate-200 bg-white hover:border-blue-200'
+                                    }`}
+                                  >
+                                    <div className="min-w-0">
+                                      {renderRecommendedTitle(option.title, option.recommended)}
+                                      <p className="mt-1 text-xs leading-5 text-slate-500">{option.desc}</p>
+                                    </div>
+                                    <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                      step2WebParseConfig.parseMode === option.value
+                                        ? 'border-blue-600 bg-blue-600'
+                                        : 'border-slate-300 bg-white'
+                                    }`}>
+                                      {step2WebParseConfig.parseMode === option.value && (
+                                        <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                                      )}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <div className="text-sm font-semibold text-slate-800">网页提取配置</div>
+                                  <div className="mt-1 text-xs leading-5 text-slate-500">控制网页编码识别、内容清洗和保留信息。</div>
+                                </div>
+                                <span className="shrink-0 whitespace-nowrap rounded-full bg-violet-50 px-3 py-1 text-[11px] font-semibold leading-none text-violet-700 ring-1 ring-violet-100">Web Extraction Config</span>
+                              </div>
+
+                              <div className="mt-4 space-y-4">
+                                <div>
+                                  <div className="mb-2 text-sm font-medium text-slate-700">编码识别</div>
+                                  <div className="flex items-start justify-between gap-3 rounded-xl border border-blue-500 bg-blue-50 p-3 ring-1 ring-blue-100">
+                                    <div className="min-w-0">
+                                      {renderRecommendedTitle('自动识别', true)}
+                                      <div className="mt-1 text-xs leading-5 text-slate-500">系统优先读取网页声明的编码格式；若无法识别或声明有误，将自动探测实际编码，确保中文内容正常显示。</div>
+                                    </div>
+                                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-blue-600 bg-blue-600">
+                                      <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <div className="mb-2 text-sm font-medium text-slate-700">内容清洗</div>
+                                  <div className="grid gap-3">
+                                    <button
+                                      type="button"
+                                      onClick={() => setStep2WebParseConfig(prev => ({ ...prev, removeScriptsAndStyles: !prev.removeScriptsAndStyles }))}
+                                      className={`flex w-full cursor-pointer items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                      step2WebParseConfig.removeScriptsAndStyles
+                                        ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                        : 'border-slate-200 bg-white hover:border-blue-200'
+                                    }`}
+                                    >
+                                      <span className="min-w-0">
+                                        <span className="block text-sm font-semibold leading-5 text-slate-900">移除脚本与样式代码</span>
+                                        <span className="mt-1 block text-xs leading-5 text-slate-500">过滤脚本、样式等非正文代码，减少无效内容进入知识库。</span>
+                                      </span>
+                                    <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                      step2WebParseConfig.removeScriptsAndStyles ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                                    }`}>
+                                      {step2WebParseConfig.removeScriptsAndStyles && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                    </span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setStep2WebParseConfig(prev => ({ ...prev, removeChrome: !prev.removeChrome }))}
+                                      className={`flex w-full cursor-pointer items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                      step2WebParseConfig.removeChrome
+                                        ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                        : 'border-slate-200 bg-white hover:border-blue-200'
+                                    }`}
+                                    >
+                                      <span className="min-w-0">
+                                        <span className="block text-sm font-semibold leading-5 text-slate-900">移除导航栏、页脚、侧边栏等非正文内容</span>
+                                        <span className="mt-1 block text-xs leading-5 text-slate-500">清理页面外围区域，只保留正文相关内容。</span>
+                                      </span>
+                                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                        step2WebParseConfig.removeChrome ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                                      }`}>
+                                        {step2WebParseConfig.removeChrome && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                      </span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <div className="mb-2 text-sm font-medium text-slate-700">保留信息</div>
+                                  <div className="flex cursor-default items-start justify-between gap-3 rounded-xl border border-blue-500 bg-blue-50 p-3 ring-1 ring-blue-100">
+                                    <span className="min-w-0">
+                                      <span className="block text-sm font-semibold leading-5 text-slate-900">页面标题</span>
+                                      <span className="mt-1 block text-xs leading-5 text-slate-500">页面标题会作为摘要或元数据保留。</span>
+                                    </span>
+                                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-blue-600 bg-blue-600">
+                                      <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="mt-5 border border-slate-200 bg-white rounded-xl p-5 space-y-5">
+                          <div className="flex items-start gap-3">
+                            <div className="w-9 h-9 bg-slate-100 rounded-lg flex items-center justify-center shrink-0">
+                              <Scissors className="w-5 h-5 text-slate-600" />
+                            </div>
+                            <div>
+                              <div className="text-sm font-semibold text-slate-800">切片方法</div>
+                              <div className="text-xs text-slate-500 mt-0.5">
+                                {fileUploadFileType === 'audio' ? '音频转写后选择文本切片策略' : fileUploadFileType === 'web' ? '网页正文抓取后选择切片策略' : '选择文档切片策略'}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2.5">
+                            {visibleStep2SliceMethodOptions.map((method) => {
+                              const MethodIcon = method.icon;
+                              const selected = step2SliceMethod === method.key;
+                              return (
+                                <button
+                                  key={method.key}
+                                  type="button"
+                                  data-slice-method={method.key}
+                                  onClick={() => applyStep2SliceMethod(method.key)}
+                                  className={`min-h-[56px] rounded-lg border px-3 py-3 text-left transition-all ${
+                                    selected
+                                      ? 'border-blue-500 bg-blue-50 shadow-sm'
+                                      : 'border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <div className="flex items-start gap-3">
+                                    <span className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                                      selected ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                                    }`}>
+                                      {selected && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                    </span>
+                                    <div className="min-w-0">
+                                      <div className={`flex items-center gap-1.5 text-sm font-semibold ${selected ? 'text-blue-700' : 'text-slate-800'}`}>
+                                        <MethodIcon className="h-3.5 w-3.5 shrink-0" />
+                                        <span className="truncate">{method.title}</span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </button>
+                              );
+                            })}
                           </div>
                         </div>
-	                      </div>
-                      {/* 操作按钮 */}
-                      <div className="flex items-center gap-4 pt-1">
+
+                        <div className="mt-5 border border-slate-200 bg-white rounded-xl p-5 space-y-5">
+                          <div className="flex items-start gap-3">
+                            <div className="w-9 h-9 bg-blue-50 rounded-lg flex items-center justify-center shrink-0 text-blue-600">
+                              {(() => {
+                                const SelectedIcon = selectedStep2SliceMethod.icon;
+                                return <SelectedIcon className="w-5 h-5" />;
+                              })()}
+                            </div>
+                            <div>
+                              <div className="text-sm font-semibold text-slate-800">分段设置</div>
+                              <div className="text-xs text-slate-500 mt-0.5">配置当前切片方式的基础参数</div>
+                            </div>
+                          </div>
+
+                          {step2SliceMethod === 'smart' && (
+                            <div className="grid gap-3">
+                              {renderDelimiterField()}
+                              {renderNumberField('分段最大长度', step2SmartConfig.maxLength, (value) => setStep2SmartConfig(prev => ({ ...prev, maxLength: value })), 1000)}
+                              {renderNumberField('分段重叠长度', step2SmartConfig.overlap, (value) => setStep2SmartConfig(prev => ({ ...prev, overlap: value })), 0, '相邻切片保留一小段重复内容，避免上下文在边界处断开。')}
+                            </div>
+                          )}
+
+                          {step2SliceMethod === 'title' && (
+                            <div className="grid gap-3">
+                              {renderSelectField('标题层级深度', step2TitleConfig.titleDepth, (value) => setStep2TitleConfig(prev => ({ ...prev, titleDepth: value })), ['一级', '二级', '三级', '所有'], '按照一级、二级、三级或所有标题层级切分文本。')}
+                              {renderNumberField('分段最大长度', step2TitleConfig.maxLength, (value) => setStep2TitleConfig(prev => ({ ...prev, maxLength: value })), 1500)}
+                              {renderNumberField('分段重叠长度', step2TitleConfig.overlap, (value) => setStep2TitleConfig(prev => ({ ...prev, overlap: value })), 0)}
+                            </div>
+                          )}
+
+                          {step2SliceMethod === 'record' && (
+                            <div className="grid gap-3">
+                              {renderSelectField('记录单位', step2RecordConfig.recordUnit, (value) => setStep2RecordConfig(prev => ({ ...prev, recordUnit: value })), ['自动识别', '每个问答对', '每一行表格', '每条记录'])}
+                              {renderNumberField('分段最大长度', step2RecordConfig.maxLength, (value) => setStep2RecordConfig(prev => ({ ...prev, maxLength: value })), 1200)}
+                              {renderNumberField('分段重叠长度', step2RecordConfig.overlap, (value) => setStep2RecordConfig(prev => ({ ...prev, overlap: value })), 0, '问答和表格记录通常不需要太大重叠。')}
+                            </div>
+                          )}
+
+                          {step2SliceMethod === 'page' && (
+                            <div className="grid gap-3">
+                              {renderSelectField('切分单位', step2PageConfig.pageUnit, (value) => setStep2PageConfig(prev => ({ ...prev, pageUnit: value })), ['每页一块', '每 2 页合并一块'])}
+                              {renderSwitchField('保留页码', step2PageConfig.keepPageNumber, (checked) => setStep2PageConfig(prev => ({ ...prev, keepPageNumber: checked })))}
+                              {renderSelectField('OCR 识别', step2PageConfig.ocrMode, (value) => setStep2PageConfig(prev => ({ ...prev, ocrMode: value })), ['自动', '开启', '关闭'], '扫描件或图片型 PDF 需要 OCR，自动模式会根据文件内容判断。')}
+                            </div>
+                          )}
+
+                          <div className="flex items-center gap-4 pt-1">
+                            <button
+                              onClick={() => refreshStep2Preview()}
+                              className="flex items-center gap-2 px-4 py-2 text-blue-600 border border-blue-300 rounded-lg text-sm font-medium hover:bg-blue-50 transition-all"
+                            >
+                              <Search className="w-3.5 h-3.5" />
+                              预览块
+                            </button>
+                            <button
+                              onClick={resetStep2SliceConfig}
+                              className="text-sm text-slate-500 hover:text-slate-700 transition-colors"
+                            >
+                              重置
+                            </button>
+                          </div>
+                        </div>
+                      </>
+                    )}
+
+                    {fileUploadFileType === 'table' && (
+                      <div className="mt-5 border border-slate-200 bg-white rounded-xl p-5 space-y-5">
+                        <div className="flex items-start gap-3">
+                          <div className="w-9 h-9 bg-emerald-50 rounded-lg flex items-center justify-center shrink-0">
+                            <FileStack className="w-5 h-5 text-emerald-600" />
+                          </div>
+                          <div>
+                            <div className="text-sm font-semibold text-slate-800">表格解析配置</div>
+                            <div className="text-xs text-slate-500 mt-0.5">配置如何将上传的表格文件解析为可检索的文本内容，包含解析方式和结构化转换规则。</div>
+                          </div>
+                        </div>
+
+                        <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+                          <div>
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-sm font-semibold text-slate-800">解析方式</div>
+                              <span className="shrink-0 whitespace-nowrap rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-semibold leading-none text-emerald-700 ring-1 ring-emerald-100">Parsing Mode</span>
+                            </div>
+                            <div className="mt-1 text-xs leading-5 text-slate-500">选择表格的整体解析策略，决定数据的基本组织形态。</div>
+                          </div>
+                          <div className="mt-4 grid gap-2">
+                            {[
+                              {
+                                value: 'row',
+                                title: '逐行提取',
+                                desc: '将表格的每一行视为一条独立记录，适合大多数业务数据。',
+                                recommended: true
+                              },
+                              {
+                                value: 'whole',
+                                title: '整表聚合',
+                                desc: '将整个表格作为一个整体文档处理，适合说明性表格或清单。'
+                              }
+                            ].map((option) => (
+                              <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => setStep2TableParseConfig(prev => ({ ...prev, parseMode: option.value }))}
+                                className={`flex items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                  step2TableParseConfig.parseMode === option.value
+                                    ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                    : 'border-slate-200 bg-white hover:border-blue-200'
+                                }`}
+                              >
+                                <div className="min-w-0">
+                                  {renderRecommendedTitle(option.title, option.recommended)}
+                                  <p className="mt-1 text-xs leading-5 text-slate-500">{option.desc}</p>
+                                </div>
+                                <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                  step2TableParseConfig.parseMode === option.value
+                                    ? 'border-blue-600 bg-blue-600'
+                                    : 'border-slate-300 bg-white'
+                                }`}>
+                                  {step2TableParseConfig.parseMode === option.value && (
+                                    <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                                  )}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+                          <div>
+                            <div className="text-sm font-semibold text-slate-800">结构化转换配置</div>
+                            <div className="mt-1 text-xs leading-5 text-slate-500">对解析后的行列数据进行结构化处理与语义转换。</div>
+                          </div>
+
+                          <div className="mt-4 space-y-3">
+                            <div className="rounded-lg bg-white px-3 py-3 ring-1 ring-slate-200">
+                              <div className="mb-3 text-xs font-semibold text-slate-500">文件解析配置</div>
+                              <div className="space-y-3">
+                                <div>
+                                  <div className="mb-2 text-sm font-medium text-slate-700">表头识别</div>
+                                  <div className="flex flex-wrap items-center gap-4">
+                                    <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-600">
+                                      <input
+                                        type="radio"
+                                        checked={step2TableParseConfig.headerDetection === 'auto'}
+                                        onChange={() => setStep2TableParseConfig(prev => ({ ...prev, headerDetection: 'auto' }))}
+                                        className="h-4 w-4 accent-blue-600"
+                                      />
+                                      自动识别首行
+                                    </label>
+                                    <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-600">
+                                      <input
+                                        type="radio"
+                                        checked={step2TableParseConfig.headerDetection === 'specified'}
+                                        onChange={() => setStep2TableParseConfig(prev => ({ ...prev, headerDetection: 'specified' }))}
+                                        className="h-4 w-4 accent-blue-600"
+                                      />
+                                      指定行号
+                                    </label>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      value={step2TableParseConfig.headerRow}
+                                      onChange={(e) => setStep2TableParseConfig(prev => ({ ...prev, headerRow: Math.max(1, Number(e.target.value) || 1), headerDetection: 'specified' }))}
+                                      className="h-9 w-20 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                                    />
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <div className="mb-2 text-sm font-medium text-slate-700">空行处理</div>
+                                  <div className="grid gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setStep2TableParseConfig(prev => ({
+                                        ...prev,
+                                        skipEmptyRows: !prev.skipEmptyRows,
+                                        keepEmptyRows: !prev.skipEmptyRows ? false : prev.keepEmptyRows
+                                      }))}
+                                      className={`flex w-full cursor-pointer items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                      step2TableParseConfig.skipEmptyRows
+                                        ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                        : 'border-slate-200 bg-white hover:border-blue-200'
+                                      }`}>
+                                      <span className="min-w-0">
+                                        {renderRecommendedTitle('自动跳过全空行', true)}
+                                        <span className="mt-1 block text-xs leading-5 text-slate-500">跳过没有任何有效内容的空白行。</span>
+                                      </span>
+                                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                        step2TableParseConfig.skipEmptyRows ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                                      }`}>
+                                        {step2TableParseConfig.skipEmptyRows && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                      </span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setStep2TableParseConfig(prev => ({
+                                        ...prev,
+                                        keepEmptyRows: !prev.keepEmptyRows,
+                                        skipEmptyRows: !prev.keepEmptyRows ? false : prev.skipEmptyRows
+                                      }))}
+                                      className={`flex w-full cursor-pointer items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                      step2TableParseConfig.keepEmptyRows
+                                        ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                        : 'border-slate-200 bg-white hover:border-blue-200'
+                                    }`}>
+                                      <span className="min-w-0">
+                                        <span className="block text-sm font-semibold leading-5 text-slate-900">保留空行</span>
+                                        <span className="mt-1 block text-xs leading-5 text-slate-500">保留空白行作为原始结构的一部分。</span>
+                                      </span>
+                                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                        step2TableParseConfig.keepEmptyRows ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                                      }`}>
+                                        {step2TableParseConfig.keepEmptyRows && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                      </span>
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="rounded-lg bg-white px-3 py-3 ring-1 ring-slate-200">
+                              <div className="mb-3 text-xs font-semibold text-slate-500">结构化转换方式</div>
+                              <div className="space-y-3">
+                                <div>
+                                  <div className="mb-2 text-sm font-medium text-slate-700">转换模式</div>
+                                  <div className="grid gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setStep2TableParseConfig(prev => ({ ...prev, conversionMode: 'markdown' }))}
+                                      className={`flex w-full cursor-pointer items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                      step2TableParseConfig.conversionMode === 'markdown'
+                                        ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                        : 'border-slate-200 bg-white hover:border-blue-200'
+                                    }`}>
+                                      <span className="min-w-0">
+                                        <span className="block text-sm font-semibold leading-5 text-slate-900">保留原始表格结构</span>
+                                        <span className="mt-1 block text-xs leading-5 text-slate-500">保留行列关系，适合需要还原表格结构的内容。</span>
+                                      </span>
+                                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                        step2TableParseConfig.conversionMode === 'markdown' ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                                      }`}>
+                                        {step2TableParseConfig.conversionMode === 'markdown' && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                      </span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setStep2TableParseConfig(prev => ({ ...prev, conversionMode: 'natural' }))}
+                                      className={`flex w-full cursor-pointer items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                      step2TableParseConfig.conversionMode === 'natural'
+                                        ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                        : 'border-slate-200 bg-white hover:border-blue-200'
+                                    }`}>
+                                      <span className="min-w-0">
+                                        <span className="flex flex-wrap items-center gap-2">
+                                          <span className="text-sm font-semibold leading-5 text-slate-900">转换为自然语言描述</span>
+                                          <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-semibold leading-none text-blue-700">推荐</span>
+                                        </span>
+                                        <span className="mt-1 block text-xs leading-5 text-slate-500">将行列内容转成可直接检索的描述文本。</span>
+                                      </span>
+                                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                        step2TableParseConfig.conversionMode === 'natural' ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                                      }`}>
+                                        {step2TableParseConfig.conversionMode === 'natural' && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                      </span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {step2TableParseConfig.conversionMode === 'natural' && (
+                                  <div>
+                                    <div className="mb-2 text-sm font-medium text-slate-700">描述模板（可选）</div>
+                                    <div className="space-y-2">
+                                      {(step2TableParseConfig.descriptionFields || []).map((field, index) => (
+                                        <div key={index} className="grid grid-cols-[minmax(0,1fr)_28px_minmax(0,1fr)] items-center gap-2">
+                                          <input
+                                            value={field.header}
+                                            onChange={(e) => setStep2TableParseConfig(prev => ({
+                                              ...prev,
+                                              descriptionFields: prev.descriptionFields.map((item, itemIndex) => itemIndex === index ? { ...item, header: e.target.value } : item)
+                                            }))}
+                                            placeholder={`表头${index + 1}`}
+                                            className="h-9 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                                          />
+                                          <span className="text-center text-sm font-semibold text-slate-500">为</span>
+                                          <input
+                                            value={field.value}
+                                            onChange={(e) => setStep2TableParseConfig(prev => ({
+                                              ...prev,
+                                              descriptionFields: prev.descriptionFields.map((item, itemIndex) => itemIndex === index ? { ...item, value: e.target.value } : item)
+                                            }))}
+                                            placeholder={`值${index + 1}`}
+                                            className="h-9 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                                          />
+                                        </div>
+                                      ))}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => setStep2TableParseConfig(prev => ({
+                                        ...prev,
+                                        descriptionFields: [...(prev.descriptionFields || []), { header: `表头${(prev.descriptionFields || []).length + 1}`, value: `值${(prev.descriptionFields || []).length + 1}` }]
+                                      }))}
+                                      className="mt-2 text-xs font-semibold text-blue-600 hover:text-blue-700"
+                                    >
+                                      + 添加字段
+                                    </button>
+                                  </div>
+                                )}
+
+                                <div>
+                                  <div className="mb-2 text-sm font-medium text-slate-700">多行合并策略</div>
+                                  <div className="grid gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setStep2TableParseConfig(prev => ({ ...prev, mergeStrategy: 'singleRow' }))}
+                                      className={`flex w-full cursor-pointer items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                      step2TableParseConfig.mergeStrategy === 'singleRow'
+                                        ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                        : 'border-slate-200 bg-white hover:border-blue-200'
+                                    }`}>
+                                      <span className="min-w-0">
+                                        <span className="block text-sm font-semibold leading-5 text-slate-900">每行独立</span>
+                                        <span className="mt-1 block text-xs leading-5 text-slate-500">每一行生成一条独立知识记录。</span>
+                                      </span>
+                                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                        step2TableParseConfig.mergeStrategy === 'singleRow' ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                                      }`}>
+                                        {step2TableParseConfig.mergeStrategy === 'singleRow' && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                      </span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setStep2TableParseConfig(prev => ({ ...prev, mergeStrategy: 'primaryKey' }))}
+                                      className={`flex w-full cursor-pointer items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                      step2TableParseConfig.mergeStrategy === 'primaryKey'
+                                        ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                        : 'border-slate-200 bg-white hover:border-blue-200'
+                                    }`}>
+                                      <span className="min-w-0">
+                                        <span className="block text-sm font-semibold leading-5 text-slate-900">按主键合并</span>
+                                        <span className="mt-1 block text-xs leading-5 text-slate-500">相同主键的多行内容合并为一条记录。</span>
+                                      </span>
+                                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                        step2TableParseConfig.mergeStrategy === 'primaryKey' ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                                      }`}>
+                                        {step2TableParseConfig.mergeStrategy === 'primaryKey' && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                      </span>
+                                    </button>
+                                  </div>
+                                  {step2TableParseConfig.mergeStrategy === 'primaryKey' && (
+                                    <div className="mt-3 flex items-center gap-2">
+                                      <span className="text-xs text-slate-500">主键字段</span>
+                                      <input
+                                        value={step2TableParseConfig.primaryKeyField}
+                                        onChange={(e) => setStep2TableParseConfig(prev => ({ ...prev, primaryKeyField: e.target.value }))}
+                                        placeholder="如 员工ID"
+                                        className="h-9 flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
                         <button
-                          onClick={() => {
-                            const successFiles = uploadingFiles.filter(f => f.status === 'success');
-                            const mockChunks = (successFiles.length > 0 ? [successFiles[step2PreviewFileIndex] || successFiles[0]] : []).flatMap(() =>
-                              Array.from({ length: Math.floor(Math.random() * 6) + 3 }, (_, i) => ({
-                                id: `chunk-${i + 1}`,
-                                content: `这是第 ${i + 1} 个分段的内容示例。根据当前配置（最大长度 ${step2MaxLength} 字符，重叠 ${step2Overlap} 字符），文档将被切分为若干块，每块保持语义完整性。`
-                              }))
-                            );
-                            setStep2PreviewChunks(mockChunks);
-                            setStep2ShowPreview(true);
-                          }}
+                          onClick={() => refreshStep2Preview()}
                           className="flex items-center gap-2 px-4 py-2 text-blue-600 border border-blue-300 rounded-lg text-sm font-medium hover:bg-blue-50 transition-all"
                         >
                           <Search className="w-3.5 h-3.5" />
-                          预览块
+                          生成预览
                         </button>
+                      </div>
+                    )}
+
+                    {fileUploadFileType === 'image' && (
+                      <div className="mt-5 border border-slate-200 bg-white rounded-xl p-5 space-y-5">
+                        <div className="flex items-start gap-3">
+                          <div className="w-9 h-9 bg-orange-50 rounded-lg flex items-center justify-center shrink-0">
+                            <Image className="w-5 h-5 text-orange-600" />
+                          </div>
+                          <div>
+                            <div className="text-sm font-semibold text-slate-800">图片解析配置</div>
+                            <div className="text-xs text-slate-500 mt-0.5">配置图片文件的 OCR 识别方式。识别结果将进入文本预处理流程。</div>
+                          </div>
+                        </div>
+
+                        <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-semibold text-slate-800">解析方式</div>
+                              <div className="mt-1 text-xs leading-5 text-slate-500">图片文件统一按整张图片进行 OCR 识别。</div>
+                            </div>
+                            <span className="shrink-0 whitespace-nowrap rounded-full bg-orange-50 px-3 py-1 text-[11px] font-semibold leading-none text-orange-700 ring-1 ring-orange-100">Image Parsing Config</span>
+                          </div>
+                          <div className="mt-4 min-h-[118px] rounded-xl border border-blue-200 bg-blue-50 p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                {renderRecommendedTitle('全图识别', true)}
+                                <div className="mt-1 text-xs leading-5 text-slate-500">将整张图片作为识别对象，适合截图、扫描件、票据和图片文档。</div>
+                              </div>
+                              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-blue-600 bg-blue-600">
+                                <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-semibold text-slate-800">OCR 语言模式</div>
+                              <div className="mt-1 text-xs leading-5 text-slate-500">系统将根据选择调用对应的 OCR 模型。</div>
+                            </div>
+                            <span className="shrink-0 whitespace-nowrap rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold leading-none text-slate-600">OCR Language Mode</span>
+                          </div>
+                          <div className="mt-4 grid gap-2">
+                            {[
+                              { value: 'auto', title: '自动识别', desc: '系统自动判断中英混合、纯中文或纯英文，调用最优模型。', recommended: true },
+                              { value: 'zh', title: '仅中文', desc: '国内业务首选。' },
+                              { value: 'en', title: '仅英文', desc: '外单、护照类图片。' }
+                            ].map((option) => (
+                              <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => setStep2ImageQaConfig(prev => ({ ...prev, ocrLanguageMode: option.value }))}
+                                className={`flex items-start justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                                  step2ImageQaConfig.ocrLanguageMode === option.value
+                                    ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100'
+                                    : 'border-slate-200 bg-white hover:border-blue-200'
+                                }`}
+                              >
+                                <div className="min-w-0">
+                                  {renderRecommendedTitle(option.title, option.recommended)}
+                                  <p className="mt-1 text-xs leading-5 text-slate-500">{option.desc}</p>
+                                </div>
+                                <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                                  step2ImageQaConfig.ocrLanguageMode === option.value
+                                    ? 'border-blue-600 bg-blue-600'
+                                    : 'border-slate-300 bg-white'
+                                }`}>
+                                  {step2ImageQaConfig.ocrLanguageMode === option.value && (
+                                    <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                                  )}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+                          <div className="text-sm font-semibold text-slate-800">方向校正</div>
+                          <div className="mt-3 rounded-xl border border-blue-200 bg-blue-50 p-3">
+                            <button
+                              type="button"
+                              onClick={() => setStep2ImageQaConfig(prev => ({ ...prev, orientationCorrection: true }))}
+                              className="flex w-full cursor-pointer items-start justify-between gap-3 text-left"
+                            >
+                              <span className="min-w-0">
+                                <span className="block text-sm font-semibold text-slate-900">自动旋转校正</span>
+                                <span className="mt-1 block text-xs leading-5 text-slate-500">自动转正横屏、倒立图片，提升识别率。</span>
+                              </span>
+                              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-blue-600 bg-blue-600">
+                                <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                              </span>
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-4 pt-1">
+                          <button
+                            onClick={() => refreshStep2Preview()}
+                            className="flex items-center gap-2 px-4 py-2 text-blue-600 border border-blue-300 rounded-lg text-sm font-medium hover:bg-blue-50 transition-all"
+                          >
+                            <Search className="w-3.5 h-3.5" />
+                            预览块
+                          </button>
+                          <button
+                            onClick={() => {
+                              setStep2ImageQaConfig({
+                                parseMode: 'fullImage',
+                                ocrLanguageMode: 'auto',
+                                orientationCorrection: true
+                              });
+                              setStep2PreviewChunks([]);
+                              setStep2ShowPreview(false);
+                            }}
+                            className="text-sm text-slate-500 hover:text-slate-700 transition-colors"
+                          >
+                            重置
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="mt-5 border border-slate-200 bg-white rounded-xl p-5 space-y-4">
+                      <div className="flex items-start gap-3">
+                        <div className="w-9 h-9 bg-slate-100 rounded-lg flex items-center justify-center shrink-0">
+                          <Tag className="w-5 h-5 text-slate-600" />
+                        </div>
+                        <div>
+                          <div className="text-sm font-semibold text-slate-800">文件标签</div>
+                          <div className="text-xs text-slate-500 mt-0.5">给本次上传的文件添加标签；系统会优先根据文件内容识别主题、类型和业务关键词自动生成，可继续手动添加或删除。</div>
+                        </div>
+                      </div>
+
+                      <div className="flex gap-2">
+                        <input
+                          value={fileUploadTagInput}
+                          onChange={(e) => setFileUploadTagInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key !== 'Enter') return;
+                            e.preventDefault();
+                            const tag = fileUploadTagInput.trim();
+                            if (!tag) return;
+                            if (!fileUploadTags.includes(tag)) {
+                              setFileUploadTags(prev => [...prev, tag]);
+                            }
+                            setFileUploadTagInput('');
+                          }}
+                          placeholder="输入标签后按 Enter 添加"
+                          className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                        />
                         <button
-                          onClick={() => { setStep2Separator('\\n\\n'); setStep2MaxLength(1024); setStep2Overlap(50); setStep2ReplaceSpaces(true); setStep2RemoveUrls(false); setStep2PreviewChunks([]); setStep2ShowPreview(false); }}
-                          className="text-sm text-slate-500 hover:text-slate-700 transition-colors"
+                          type="button"
+                          onClick={() => {
+                            const tag = fileUploadTagInput.trim();
+                            if (!tag) return;
+                            if (!fileUploadTags.includes(tag)) {
+                              setFileUploadTags(prev => [...prev, tag]);
+                            }
+                            setFileUploadTagInput('');
+                          }}
+                          className="rounded-lg border border-blue-300 px-4 py-2 text-sm font-medium text-blue-600 transition-all hover:bg-blue-50"
                         >
-                          重置
+                          添加
                         </button>
-	                      </div>
-	                    </div>
+                      </div>
+
+                      {(fileUploadTags.length > 0 || uploadingFiles.length > 0) && (
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+                            {fileUploadTags.map((tag) => (
+                              <span key={tag} className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">
+                                {tag}
+                                <button
+                                  type="button"
+                                  onClick={() => setFileUploadTags(prev => prev.filter(item => item !== tag))}
+                                  className="text-blue-400 hover:text-blue-700"
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                          {uploadingFiles.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const nextGeneration = fileUploadTagGenerationCount + 1;
+                                const autoTags = generateFileUploadTags(
+                                  fileUploadFileType,
+                                  uploadingFiles.map(file => ({ name: file.name, url: file.sourceUrl, content: file.content })),
+                                  nextGeneration
+                                );
+                                setFileUploadTagGenerationCount(nextGeneration);
+                                setAutoGeneratedFileTags(autoTags);
+                                setFileUploadTags(prev => {
+                                  const manualTags = prev.filter(tag => !autoGeneratedFileTags.includes(tag));
+                                  return Array.from(new Set([...manualTags, ...autoTags]));
+                                });
+                              }}
+                              className="shrink-0 rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-semibold text-blue-600 transition-all hover:bg-blue-50"
+                            >
+                              重新生成
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                    </div>
 
 	                    <div className="mt-5 rounded-xl border border-slate-200 bg-white p-5 space-y-5">
 	                      <div className="flex items-start gap-3">
@@ -7140,24 +10615,34 @@ export default function App() {
 	                        </div>
 	                      </div>
 	                      <div className="space-y-2.5">
-	                        <label className="flex items-center gap-2.5 cursor-pointer rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 hover:bg-slate-100 transition-colors">
-	                          <input
-	                            type="checkbox"
-	                            checked={step2ReplaceSpaces}
-	                            onChange={(e) => setStep2ReplaceSpaces(e.target.checked)}
-	                            className="w-4 h-4 rounded accent-blue-600"
-	                          />
-	                          <span className="text-sm text-slate-700">替换掉连续的空格、换行符和制表符</span>
-	                        </label>
-	                        <label className="flex items-center gap-2.5 cursor-pointer rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 hover:bg-slate-100 transition-colors">
-	                          <input
-	                            type="checkbox"
-	                            checked={step2RemoveUrls}
-	                            onChange={(e) => setStep2RemoveUrls(e.target.checked)}
-	                            className="w-4 h-4 rounded accent-blue-600"
-	                          />
-	                          <span className="text-sm text-slate-700">删除所有 URL 和电子邮件地址</span>
-	                        </label>
+	                        <button
+	                          type="button"
+	                          onClick={() => setStep2ReplaceSpaces(prev => !prev)}
+	                          className={`flex w-full cursor-pointer items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors ${
+	                          step2ReplaceSpaces ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100' : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
+	                        }`}
+	                        >
+	                          <span className="min-w-0 text-sm text-slate-700">替换掉连续的空格、换行符和制表符</span>
+	                          <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+	                            step2ReplaceSpaces ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+	                          }`}>
+	                            {step2ReplaceSpaces && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+	                          </span>
+	                        </button>
+	                        <button
+	                          type="button"
+	                          onClick={() => setStep2RemoveUrls(prev => !prev)}
+	                          className={`flex w-full cursor-pointer items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors ${
+	                          step2RemoveUrls ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-100' : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
+	                        }`}
+	                        >
+	                          <span className="min-w-0 text-sm text-slate-700">删除所有 URL 和电子邮件地址</span>
+	                          <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+	                            step2RemoveUrls ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+	                          }`}>
+	                            {step2RemoveUrls && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+	                          </span>
+	                        </button>
 	                      </div>
 	                    </div>
 
@@ -7424,10 +10909,10 @@ export default function App() {
 	                    </div>
 	                  </div>
 
-	                  {/* 右侧：文档分块预览 */}
+                  {/* 右侧：文档分块预览 */}
                   <div className="flex-1 border border-slate-200 rounded-xl overflow-hidden flex flex-col bg-white">
                     <div className="px-5 py-3 border-b border-slate-200 flex items-center gap-3">
-                      <span className="text-xs text-slate-500 font-medium">预览</span>
+                      <span className="text-xs text-slate-500 font-medium">{getStep2PreviewLabel()}</span>
                       <div className="relative">
                         <select
                           value={step2PreviewFileIndex}
@@ -7447,7 +10932,7 @@ export default function App() {
                         <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
                       </div>
                       <span className="px-2.5 py-1 bg-white border border-slate-200 text-slate-500 text-xs font-medium rounded-lg shrink-0">
-                        {step2ShowPreview ? step2PreviewChunks.length : 0} 预估块
+                        {step2ShowPreview ? step2PreviewChunks.length : 0} {fileUploadFileType === 'table' ? '条记录' : fileUploadFileType === 'image' ? '条问答' : '预估块'}
                       </span>
                     </div>
                     <div className="flex-1 overflow-y-auto p-5">
@@ -7457,7 +10942,7 @@ export default function App() {
                             <circle cx="11" cy="11" r="8" />
                             <path d="M21 21l-4.35-4.35" strokeLinecap="round" />
                           </svg>
-                          <p className="text-sm text-slate-400">点击左侧的"预览块"按钮来加载预览</p>
+                          <p className="text-sm text-slate-400">{getStep2PreviewEmptyText()}</p>
                         </div>
                       ) : (
                         <div className="space-y-3">
@@ -8255,12 +11740,23 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="mt-6 grid grid-cols-3 gap-3">
+                      <div className={`mt-6 grid gap-3 ${skipUploadRuleConfig ? 'grid-cols-1' : 'grid-cols-3'}`}>
                         <div className="rounded-xl bg-slate-50 border border-slate-100 p-4">
-                          <div className="text-xs text-slate-400 mb-2">分段模式</div>
-                          <div className="text-sm font-semibold text-slate-700">通用分段</div>
-                          <div className="text-xs text-slate-500 mt-1">最大 {step2MaxLength} 字符 / 重叠 {step2Overlap} 字符</div>
+                          {(() => {
+                            const ruleSummary = getStep3RuleSummary();
+                            return (
+                              <>
+                                <div className="text-xs text-slate-400 mb-2">{ruleSummary.label}</div>
+                                <div className="text-sm font-semibold text-slate-700">{ruleSummary.title}</div>
+                                {ruleSummary.desc && (
+                                  <div className="text-xs text-slate-500 mt-1">{ruleSummary.desc}</div>
+                                )}
+                              </>
+                            );
+                          })()}
                         </div>
+                        {!skipUploadRuleConfig && (
+                          <>
 	                        <div className="rounded-xl bg-slate-50 border border-slate-100 p-4">
 	                          <div className="text-xs text-slate-400 mb-2">索引方式</div>
 	                          <div className="text-sm font-semibold text-slate-700">{step2IndexMethod}</div>
@@ -8275,6 +11771,8 @@ export default function App() {
                           <div className="text-sm font-semibold text-slate-700">混合检索</div>
                           <div className="text-xs text-slate-500 mt-1">标签参与召回 / 语义优先排序</div>
                         </div>
+                          </>
+                        )}
                       </div>
                     </div>
 
@@ -8291,6 +11789,24 @@ export default function App() {
                       <div className="divide-y divide-slate-100">
                         {uploadingFiles.filter(file => file.status === 'success').map((file) => {
                           const progress = importStatus === 'success' ? 100 : (processingFileProgress[file.id] || 0);
+                          const previewEntries = createStep2PreviewEntries(file);
+                          const audioSegments = file.sourceType === 'audio'
+                            ? getAudioTranscriptSegments({
+                                name: file.name,
+                                content: file.content,
+                                asrText: file.asrText,
+                                asrSegments: file.asrSegments
+                              })
+                            : [];
+                          const parsedCharCount = file.sourceType === 'audio'
+                            ? audioSegments.reduce((sum, segment) => sum + segment.text.length, 0)
+                            : previewEntries.reduce((sum, entry) => sum + entry.content.length, 0);
+                          const parsedChunkCount = file.sourceType === 'audio' ? audioSegments.length : previewEntries.length;
+                          const fileMetricText = file.sourceType === 'audio' && file.asrStatus === 'processing'
+                            ? '上传完成 · ASR 转写中...'
+                            : file.sourceType === 'audio' && file.asrStatus === 'failed'
+                              ? '上传完成 · ASR 未生成真实文本'
+                              : `${getFileProcessingStatus(progress)} · ${parsedChunkCount} 个切片 · ${parsedCharCount} 字符`;
                           return (
                             <div key={file.id} className="px-6 py-4">
                               <div className="flex items-center justify-between gap-4">
@@ -8300,7 +11816,9 @@ export default function App() {
                                   </div>
                                   <div className="min-w-0">
                                     <div className="text-sm font-semibold text-slate-800 truncate">{file.name}</div>
-                                    <div className="text-xs text-slate-500 mt-1">{getFileProcessingStatus(progress)}</div>
+                                    <div className="text-xs text-slate-500 mt-1">
+                                      {fileMetricText}
+                                    </div>
                                   </div>
                                 </div>
                                 <div className="w-64 shrink-0">
@@ -8330,7 +11848,7 @@ export default function App() {
                 {fileUploadStep !== 3 && (
                   <button
                     onClick={() => {
-                      const hasContent = uploadingFiles.length > 0 || fileUploadTags.length > 0;
+                      const hasContent = uploadingFiles.length > 0 || webAddedUrls.length > 0 || fileUploadTags.length > 0;
                       if (hasContent) { setShowFileUploadExitModal(true); }
                       else { setShowFileUploadPage(false); setUploadingFiles([]); setFileUploadStep(1); }
                     }}
@@ -8343,11 +11861,22 @@ export default function App() {
                 {fileUploadStep === 1 && (
                   <button
                     disabled={
-                      uploadingFiles.length === 0 ||
-                      uploadingFiles.some(f => f.status === 'uploading') ||
-                      uploadingFiles.some(f => f.status === 'error')
+                      fileUploadFileType === 'web'
+                        ? webAddedUrls.length === 0 ||
+                          uploadingFiles.some(f => f.status === 'uploading') ||
+                          uploadingFiles.some(f => f.status === 'error')
+                        : uploadingFiles.length === 0 ||
+                          uploadingFiles.some(f => f.status === 'uploading') ||
+                          uploadingFiles.some(f => f.status === 'error') ||
+                          uploadingFiles.some(f => f.sourceType === 'audio' && !isAudioUploadReady(f))
                     }
-                    onClick={() => setFileUploadStep(2)}
+                    onClick={() => {
+                      if (skipUploadRuleConfig) {
+                        startFileImport();
+                        return;
+                      }
+                      setFileUploadStep(2);
+                    }}
                     className="flex items-center gap-2 px-8 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-bold hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                   >
                     <span>下一步</span>
@@ -8892,6 +12421,7 @@ export default function App() {
 	                            // 打开文档详情页
 	                            setActiveDocumentChunkId(1);
 	                            setExpandedDocumentChunkIds([]);
+	                            setShowDocumentChunks(false);
 	                            setSelectedDocument(doc);
 	                          }
                         }}
@@ -11905,6 +15435,75 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* 权限管理批量删除确认弹窗 */}
+      <AnimatePresence>
+        {showPermissionBatchDeleteConfirm && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowPermissionBatchDeleteConfirm(false)}
+              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="relative w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl"
+            >
+              <div className="flex items-start gap-4">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-red-50 text-red-600">
+                  <Trash2 className="h-6 w-6" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-lg font-bold text-slate-900">确认批量删除用户？</h2>
+                  <p className="mt-2 text-sm leading-6 text-slate-600">
+                    将删除已选的 <span className="font-semibold text-red-600">{selectedPermissionUserIds.length}</span> 个用户，并解除这些用户与部门的关联。删除后不可恢复，是否继续？
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <div className="text-xs font-medium text-slate-500">将删除的用户</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {selectedPermissionUsers.slice(0, 6).map((user) => (
+                    <span key={user.id} className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 shadow-sm">
+                      {user.name}
+                    </span>
+                  ))}
+                  {selectedPermissionUsers.length > 6 && (
+                    <span className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-500 shadow-sm">
+                      +{selectedPermissionUsers.length - 6}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-6 flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowPermissionBatchDeleteConfirm(false)}
+                  className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-medium text-slate-600 transition-all hover:bg-slate-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    batchDeletePermissionUsers();
+                    setShowPermissionBatchDeleteConfirm(false);
+                  }}
+                  className="rounded-xl bg-red-600 px-5 py-2.5 text-sm font-semibold text-white transition-all hover:bg-red-700"
+                >
+                  确认删除
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* 权限管理操作弹窗 */}
       <AnimatePresence>
         {permissionAction.type && (
@@ -11946,7 +15545,7 @@ export default function App() {
                     {permissionAction.type === 'setDepartmentOwner' && '设置部门负责人'}
                     {permissionAction.type === 'deleteDepartment' && '删除部门'}
                     {permissionAction.type === 'addDepartmentMember' && '添加部门成员'}
-                    {permissionAction.type === 'removeDepartmentMember' && '移除部门成员'}
+                    {permissionAction.type === 'removeDepartmentMember' && '移出部门'}
                     {permissionAction.type === 'changeDepartmentMember' && '更换部门'}
                   </h2>
                   <p className="mt-1 text-sm text-slate-500">
@@ -11966,8 +15565,8 @@ export default function App() {
                       <input name="name" placeholder="请输入姓名" className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
                     </label>
                     <label className="text-sm font-medium text-slate-700">
-                      账号/工号 <span className="text-red-500">*</span>
-                      <input name="account" placeholder="如 zhangsan / U-1008" className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
+                      账号 <span className="text-red-500">*</span>
+                      <input name="account" placeholder="如 zhangsan" className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
                     </label>
                     <label className="text-sm font-medium text-slate-700">
                       手机号 <span className="text-red-500">*</span>
@@ -11987,7 +15586,7 @@ export default function App() {
                       </select>
                     </label>
                     <label className="text-sm font-medium text-slate-700">
-                      绑定角色 <span className="text-red-500">*</span>
+                      绑定角色
                       <select name="role" defaultValue="普通成员" className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20">
                         {permissionRoles.map((role) => (
                           <option key={role.id} value={role.name}>{role.name}</option>
@@ -12002,8 +15601,8 @@ export default function App() {
                       </select>
                     </label>
                     <label className="text-sm font-medium text-slate-700">
-                      初始密码 <span className="text-red-500">*</span>
-                      <input name="initialPassword" type="password" defaultValue="000000" className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
+                      密码
+                      <input name="password" type="text" defaultValue={DEFAULT_AUTH_PASSWORD} maxLength={6} inputMode="numeric" className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
                     </label>
                   </div>
                 )}
@@ -12015,8 +15614,8 @@ export default function App() {
                       <input name="name" defaultValue={permissionAction.user.name} readOnly className="mt-2 w-full cursor-not-allowed rounded-xl border border-slate-200 bg-slate-100 px-4 py-2.5 text-sm text-slate-500" />
                     </label>
                     <label className="text-sm font-medium text-slate-700">
-                      账号/工号
-                      <input name="account" defaultValue={`${permissionAction.user.account} / ${permissionAction.user.id}`} readOnly className="mt-2 w-full cursor-not-allowed rounded-xl border border-slate-200 bg-slate-100 px-4 py-2.5 text-sm text-slate-500" />
+                      账号
+                      <input name="account" defaultValue={permissionAction.user.account} readOnly className="mt-2 w-full cursor-not-allowed rounded-xl border border-slate-200 bg-slate-100 px-4 py-2.5 text-sm text-slate-500" />
                     </label>
                     <label className="text-sm font-medium text-slate-700">
                       手机号
@@ -12036,11 +15635,23 @@ export default function App() {
                       </select>
                     </label>
                     <label className="text-sm font-medium text-slate-700">
+                      绑定角色
+                      <select name="role" defaultValue={permissionAction.user.role} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20">
+                        {permissionRoles.map((role) => (
+                          <option key={role.id} value={role.name}>{role.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="text-sm font-medium text-slate-700">
                       账号状态
                       <select name="status" defaultValue={permissionAction.user.status} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20">
                         <option value="在职">在职</option>
                         <option value="已禁用">已禁用</option>
                       </select>
+                    </label>
+                    <label className="text-sm font-medium text-slate-700">
+                      密码
+                      <input name="password" type="text" defaultValue={getUserPassword(permissionAction.user.id)} maxLength={6} inputMode="numeric" className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
                     </label>
                   </div>
                 )}
@@ -12119,72 +15730,28 @@ export default function App() {
                 {permissionAction.type === 'editRole' && permissionAction.role && (
                   <div className="space-y-5">
                     <label className="block text-sm font-medium text-slate-700">
-                      角色名称
+                      角色名称 <span className="text-red-500">*</span>
                       <input name="roleName" defaultValue={permissionAction.role.name} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
                     </label>
                     <label className="block text-sm font-medium text-slate-700">
-                      角色描述
+                      角色描述 <span className="text-red-500">*</span>
                       <textarea name="roleDescription" defaultValue={permissionAction.role.description} rows={3} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
                     </label>
-                    <div className="rounded-xl border border-slate-200 p-4">
-                      <div className="mb-3 flex items-center justify-between gap-3">
-                        <div className="text-sm font-semibold text-slate-900">页面权限</div>
-                        {permissionAction.role.type === '预置' && (
-                          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-600">预置角色权限不可编辑</span>
-                        )}
-                      </div>
-                      {permissionAction.role.type === '预置' ? (
-                        <div className="flex flex-wrap gap-3">
-                          {ROLE_PERMISSION_OPTIONS.map((permission) => (
-                            <label key={permission} className="inline-flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                              <input
-                                name="knowledgePermissions"
-                                value={permission}
-                                type="checkbox"
-                                checked={getRolePermissionOptionState(permissionAction.role!)[permission]}
-                                disabled
-                                readOnly
-                                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-80"
-                              />
-                              {permission}
-                            </label>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="flex flex-wrap gap-2">
-                          {ROLE_PERMISSION_OPTIONS.map((permission) => (
-                            <label key={permission} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-xs text-slate-600">
-                              <input name="knowledgePermissions" value={permission} type="checkbox" defaultChecked={getRolePermissionOptionState(permissionAction.role!)[permission]} className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
-                              {permission}
-                            </label>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                    <RolePermissionMatrix role={permissionAction.role} />
                   </div>
                 )}
 
                 {permissionAction.type === 'createRole' && (
                   <div className="space-y-5">
                     <label className="block text-sm font-medium text-slate-700">
-                      角色名称
+                      角色名称 <span className="text-red-500">*</span>
                       <input name="roleName" placeholder="如 数据审核员" className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
                     </label>
                     <label className="block text-sm font-medium text-slate-700">
-                      角色描述
+                      角色描述 <span className="text-red-500">*</span>
                       <textarea name="roleDescription" placeholder="说明该角色的适用范围和职责" rows={3} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
                     </label>
-                    <div className="rounded-xl border border-slate-200 p-4">
-                      <div className="mb-3 text-sm font-semibold text-slate-900">页面权限</div>
-                      <div className="flex flex-wrap gap-2">
-                        {ROLE_PERMISSION_OPTIONS.map((permission) => (
-                          <label key={permission} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-xs text-slate-600">
-                            <input name="knowledgePermissions" value={permission} type="checkbox" defaultChecked={permission === '查看'} className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
-                            {permission}
-                          </label>
-                        ))}
-                      </div>
-                    </div>
+                    <RolePermissionMatrix defaultKnowledge />
                   </div>
                 )}
 
@@ -12204,7 +15771,7 @@ export default function App() {
                   <div className="overflow-hidden rounded-xl border border-slate-200">
                     <div className="grid grid-cols-[minmax(180px,1fr)_130px_minmax(160px,1fr)_90px] items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 text-xs font-semibold text-slate-500">
                       <div>用户</div>
-                      <div>账号/工号</div>
+                      <div>账号</div>
                       <div>所属部门</div>
                       <div>状态</div>
                     </div>
@@ -12236,24 +15803,9 @@ export default function App() {
                 {permissionAction.type === 'viewRolePermissions' && permissionAction.role && (
                   <div className="space-y-4">
                     <div className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-700">
-                      {permissionAction.role.name} 当前权限范围如下，使用选项形式展示；选中项由该角色的真实权限矩阵映射得出。
+                      {permissionAction.role.name} 当前权限如下，内容与创建/编辑角色时配置的“权限”保持同步；此处仅支持查看，不支持修改。
                     </div>
-                    <div className="rounded-xl border border-slate-200 p-4">
-                        <div className="mb-4 text-base font-bold text-slate-900">页面权限</div>
-                        <div className="flex flex-wrap gap-3">
-                          {ROLE_PERMISSION_OPTIONS.map((permission) => (
-                            <label key={permission} className="inline-flex items-center gap-2 rounded-lg bg-slate-50 px-3.5 py-2.5 text-sm text-slate-700">
-                              <input
-                                type="checkbox"
-                                checked={getRolePermissionOptionState(permissionAction.role!)[permission]}
-                                readOnly
-                                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                              />
-                              {permission}
-                            </label>
-                          ))}
-                        </div>
-                      </div>
+                    <RolePermissionMatrix role={permissionAction.role} readOnly />
                   </div>
                 )}
 
@@ -12340,24 +15892,28 @@ export default function App() {
                   </label>
                 )}
 
-                {permissionAction.type === 'removeDepartmentMember' && permissionAction.department && (
-                  <label className="block text-sm font-medium text-slate-700">
-                    选择要移除的成员
-                    <select name="memberId" defaultValue={permissionAction.user?.id || ''} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20">
-                      <option value="">请选择成员</option>
-                      {permissionUsers
-                        .filter((user) => permissionAction.department?.memberIds.includes(user.id) || user.department === permissionAction.department?.name)
-                        .map((user) => (
-                          <option key={user.id} value={user.id}>{user.name} · {user.account}</option>
-                        ))}
-                    </select>
-                  </label>
+                {permissionAction.type === 'removeDepartmentMember' && permissionAction.department && permissionAction.user && (
+                  <div className="space-y-4">
+                    <div className="rounded-xl border border-red-100 bg-red-50/80 p-4 text-sm text-red-700">
+                      <div className="font-semibold text-red-800">仅移出当前成员</div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="text-xs font-medium text-slate-500">当前成员</div>
+                      <div className="mt-2 flex items-center gap-3">
+                        <img src={permissionAction.user.avatar} alt={permissionAction.user.name} className="h-10 w-10 rounded-lg border border-slate-200 bg-white" />
+                        <div>
+                          <div className="text-sm font-semibold text-slate-900">{permissionAction.user.name}</div>
+                          <div className="text-xs text-slate-500">{permissionAction.user.account} · 当前部门：{permissionAction.department.name}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 )}
 
                 {permissionAction.type === 'changeDepartmentMember' && permissionAction.department && permissionAction.user && (
                   <div className="space-y-4">
-                    <div className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-700">
-                      正在为 {permissionAction.user.name} 更换所属部门，保存后成员会从当前部门移至目标部门。
+                    <div className="rounded-xl border border-blue-100 bg-blue-50/80 p-4 text-sm text-blue-700">
+                      <div className="font-semibold text-blue-800">仅更换当前成员部门</div>
                     </div>
                     <label className="block text-sm font-medium text-slate-700">
                       目标部门
@@ -12385,7 +15941,13 @@ export default function App() {
                       permissionAction.type === 'deleteRole' || permissionAction.type === 'deleteDepartment' ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
                     }`}
                   >
-                  {permissionAction.type === 'deleteRole' || permissionAction.type === 'deleteDepartment' || permissionAction.type === 'deleteUser' ? '确认删除' : '保存'}
+                    {permissionAction.type === 'deleteRole' || permissionAction.type === 'deleteDepartment' || permissionAction.type === 'deleteUser'
+                      ? '确认删除'
+                      : permissionAction.type === 'removeDepartmentMember'
+                        ? '确认移出'
+                        : permissionAction.type === 'changeDepartmentMember'
+                          ? '确认更换'
+                          : '保存'}
                   </button>
                 )}
               </div>

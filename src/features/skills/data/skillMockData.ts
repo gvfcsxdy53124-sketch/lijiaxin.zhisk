@@ -1,0 +1,520 @@
+import type {SkillEditForm, SkillExecutionRecord, SkillItem, SkillUser} from '../types';
+
+export const CURRENT_SKILL_USER: SkillUser = {
+  id: 'u-admin-001',
+  name: '海洋饼干',
+  avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=haiyang-binggan',
+  role: '管理员',
+};
+
+export const EMPTY_SKILL_EDIT_FORM: SkillEditForm = {
+  name: '',
+  description: '',
+  icon: '✨',
+  tags: [],
+  tagInput: '',
+  version: 'V1.0.0',
+  releaseNotes: '',
+  promptLogic: '',
+};
+
+const timeText = (offsetMs: number) =>
+  new Date(Date.now() - offsetMs).toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).replace(/\//g, '-');
+
+export const INITIAL_SKILLS: SkillItem[] = [
+  {
+    id: 'skill-101',
+    name: '知识摘要',
+    description: '对长文本知识（文档、报告、文章等）进行结构化摘要，提炼核心观点、关键信息与逻辑脉络，降低理解成本。',
+    icon: '📄',
+    status: '已发布',
+    tags: ['摘要', '文档', '知识处理'],
+    creatorId: CURRENT_SKILL_USER.id,
+    creatorName: CURRENT_SKILL_USER.name,
+    creatorAvatar: CURRENT_SKILL_USER.avatar,
+    addCount: 238,
+    updatedAt: '2026-06-14 21:10',
+    latestVersion: 'V1.0.0',
+    addedByCurrentUser: true,
+    introduction: {
+      coreFeatures: [
+        {
+          title: '核心观点提取',
+          description: '识别长文本中的主旨、核心论点和主要结论，帮助用户快速把握文档想表达的重点。',
+        },
+        {
+          title: '关键信息筛选',
+          description: '从内容中提取数据、结论、行动项和重要事实，减少用户反复翻阅原文的成本。',
+        },
+        {
+          title: '逻辑关系梳理',
+          description: '将因果、递进、对比和问题解决结构整理出来，让摘要不仅短，而且能保留原文脉络。',
+        },
+      ],
+      scenarios: ['文献/报告速读', '知识库内容浓缩', '会议纪要整理'],
+      promptLogic: '系统接收长文本，按「核心观点→关键细节→逻辑关系」优先级提炼，输出结构化摘要，并支持简洁或详细模式切换。',
+      examples: [
+        {title: '摘要《人工智能发展趋势报告》（2025）', content: '对《人工智能发展趋势报告（2025）》进行摘要，突出技术突破、产业应用、政策影响三方面。'},
+        {title: '摘要团队周报（研发部，20250609-0613）', content: '总结研发部周报的核心进展、问题与计划，输出3点关键内容。'},
+      ],
+    },
+    versions: [
+      {version: 'V1.0.0', date: '2026-06-14', notes: ['新增长文本结构化摘要能力', '支持核心观点、关键细节和逻辑关系提炼']},
+    ],
+  },
+  {
+    id: 'skill-102',
+    name: '元数据标注',
+    description: '为文档、资源自动识别并标注元数据（主题、作者、时间、类别、关键词等），完善知识库索引，提升检索精准度。',
+    icon: '🏷️',
+    status: '已发布',
+    tags: ['元数据', '标签', '检索优化'],
+    creatorId: CURRENT_SKILL_USER.id,
+    creatorName: CURRENT_SKILL_USER.name,
+    creatorAvatar: CURRENT_SKILL_USER.avatar,
+    addCount: 186,
+    updatedAt: '2026-06-14 21:08',
+    latestVersion: 'V1.0.0',
+    addedByCurrentUser: true,
+    introduction: {
+      coreFeatures: [
+        {
+          title: '主题识别',
+          description: '分析文本所属主题和业务领域，例如 AI、产品设计、制度流程等，用于后续分类和筛选。',
+        },
+        {
+          title: '属性提取',
+          description: '提取作者、创建时间、文档类型、发布机构等结构化属性，补齐知识资产的基础信息。',
+        },
+        {
+          title: '关键词推荐',
+          description: '根据正文内容推荐精准关键词，帮助知识库建立更稳定的检索和过滤维度。',
+        },
+      ],
+      scenarios: ['知识库资源整合', '新文档入库', '检索优化'],
+      promptLogic: '系统分析文本内容，结合内置元数据规范，输出标准化元数据标签和可用于检索过滤的字段。',
+      examples: [
+        {title: '标注产品需求文档（PRD_20250610）', content: '为PRD_20250610标注元数据：主题、目标用户、功能模块、优先级。'},
+        {title: '标注行业分析报告（AI_2025）', content: '分析AI_2025行业报告，输出元数据标签（主题、发布机构、核心结论）。'},
+      ],
+    },
+    versions: [
+      {version: 'V1.0.0', date: '2026-06-14', notes: ['新增主题识别、属性提取和关键词推荐', '支持知识库入库前元数据补全']},
+    ],
+  },
+  {
+    id: 'skill-103',
+    name: '认知类型识别',
+    description: '分析用户提问的认知层级（记忆、理解、应用、分析、评价、创造），为后续回答策略提供依据。',
+    icon: '🧠',
+    status: '已发布',
+    tags: ['认知分析', '问答策略', '学习'],
+    creatorId: CURRENT_SKILL_USER.id,
+    creatorName: CURRENT_SKILL_USER.name,
+    creatorAvatar: CURRENT_SKILL_USER.avatar,
+    addCount: 142,
+    updatedAt: '2026-06-14 21:06',
+    latestVersion: 'V1.0.0',
+    addedByCurrentUser: true,
+    introduction: {
+      coreFeatures: [
+        {
+          title: '认知维度判定',
+          description: '识别用户提问属于记忆、理解、应用、分析、评价或创造中的哪一类认知层级。',
+        },
+        {
+          title: '认知标签输出',
+          description: '将问题转化为可用标签，例如记忆型、分析型、创造型，方便后续问答策略匹配。',
+        },
+        {
+          title: '难度评估',
+          description: '结合问题目标、知识跨度和操作复杂度，判断问题属于简单、中等还是复杂。',
+        },
+      ],
+      scenarios: ['问答策略优化', '学习内容推荐', '思维训练'],
+      promptLogic: '系统解析用户问题的表述、意图和所需能力，对照布鲁姆认知分类模型，输出认知类型标签与难度等级。',
+      examples: [
+        {title: '识别问题（「什么是人工智能？」）', content: '判断问题「什么是人工智能？」的认知类型（记忆/理解/应用/分析/评价/创造）。'},
+        {title: '识别问题（「如何用Python实现图像识别？」）', content: '分析「如何用Python实现图像识别？」的认知类型及难度（简单/中等/复杂）。'},
+      ],
+    },
+    versions: [
+      {version: 'V1.0.0', date: '2026-06-14', notes: ['新增布鲁姆认知分类判断', '支持认知标签和问题难度输出']},
+    ],
+  },
+  {
+    id: 'skill-104',
+    name: '冲突检测',
+    description: '检测知识库内容中的矛盾点（观点冲突、数据矛盾、逻辑谬误），保障知识准确性。',
+    icon: '⚠️',
+    status: '已发布',
+    tags: ['审核', '冲突检测', '风险'],
+    creatorId: CURRENT_SKILL_USER.id,
+    creatorName: CURRENT_SKILL_USER.name,
+    creatorAvatar: CURRENT_SKILL_USER.avatar,
+    addCount: 97,
+    updatedAt: '2026-06-14 21:04',
+    latestVersion: 'V1.0.0',
+    addedByCurrentUser: true,
+    introduction: {
+      coreFeatures: [
+        {
+          title: '观点矛盾识别',
+          description: '对比多份文档或同一主题下的不同段落，识别观点是否互相否定或结论不一致。',
+        },
+        {
+          title: '数据冲突检测',
+          description: '核对市场规模、时间、比例、版本号等关键数据，标记来源之间的不一致。',
+        },
+        {
+          title: '逻辑漏洞分析',
+          description: '识别归因错误、前后矛盾、证据不足等论证问题，为内容审核提供线索。',
+        },
+      ],
+      scenarios: ['知识库审核', '新内容入库', '决策支持'],
+      promptLogic: '系统对比多份知识文档的观点、数据和逻辑，标记冲突点并说明冲突类型，例如观点对立、数据不一致或逻辑漏洞。',
+      examples: [
+        {title: '检测文档A（2025营销方案）与文档B（2024营销复盘）', content: '对比文档A（2025营销方案）和文档B（2024营销复盘），检测观点/数据/逻辑冲突。'},
+        {title: '检测知识库中关于「AI伦理」的文章', content: '分析知识库中「AI伦理」相关文章的冲突点（观点/数据/逻辑）。'},
+      ],
+    },
+    versions: [
+      {version: 'V1.0.0', date: '2026-06-14', notes: ['新增观点、数据和逻辑三类冲突检测', '支持冲突类型说明和审核建议']},
+    ],
+  },
+  {
+    id: 'skill-105',
+    name: '过期检测',
+    description: '检测知识内容的时效性，标记过期内容与最新版本，确保知识有效性。',
+    icon: '📅',
+    status: '已发布',
+    tags: ['时效性', '版本维护', '知识治理'],
+    creatorId: CURRENT_SKILL_USER.id,
+    creatorName: CURRENT_SKILL_USER.name,
+    creatorAvatar: CURRENT_SKILL_USER.avatar,
+    addCount: 121,
+    updatedAt: '2026-06-14 21:02',
+    latestVersion: 'V1.0.0',
+    addedByCurrentUser: true,
+    introduction: {
+      coreFeatures: [
+        {
+          title: '有效期识别',
+          description: '识别发布日期、有效期、适用版本和政策周期，判断内容是否仍处于有效范围。',
+        },
+        {
+          title: '版本对比',
+          description: '对比历史版本和当前内容，识别已过时的规则、技术栈、流程或制度条款。',
+        },
+        {
+          title: '更新建议',
+          description: '针对过期内容给出更新方向、替换资料或需要人工复核的重点位置。',
+        },
+      ],
+      scenarios: ['政策/法规跟踪', '技术文档维护', '知识库更新'],
+      promptLogic: '系统提取内容中的时间标签，结合当前日期和行业更新周期，判断内容是否过期并给出更新建议。',
+      examples: [
+        {title: '检测文档《2024版员工手册》', content: '检查《2024版员工手册》的时效性，标记过期条款（如「考勤制度」）。'},
+        {title: '检测知识库中「Python教程」', content: '分析「Python教程」的版本与内容，判断是否过期（参考Python官方更新）。'},
+      ],
+    },
+    versions: [
+      {version: 'V1.0.0', date: '2026-06-14', notes: ['新增知识时效性检测', '支持过期内容标记和更新建议输出']},
+    ],
+  },
+  {
+    id: 'skill-106',
+    name: '问答路由',
+    description: '根据用户问题智能分配到最适配的知识源/技能（如FAQ库、技术文档、客服），提升问答效率。',
+    icon: '🔀',
+    status: '已发布',
+    tags: ['路由', '问答', '多技能协作'],
+    creatorId: CURRENT_SKILL_USER.id,
+    creatorName: CURRENT_SKILL_USER.name,
+    creatorAvatar: CURRENT_SKILL_USER.avatar,
+    addCount: 164,
+    updatedAt: '2026-06-14 21:00',
+    latestVersion: 'V1.0.0',
+    addedByCurrentUser: true,
+    introduction: {
+      coreFeatures: [
+        {
+          title: '问题分类',
+          description: '识别用户问题所属领域，例如产品使用、技术支持、制度流程或客服咨询。',
+        },
+        {
+          title: '知识源匹配',
+          description: '根据问题领域和关键词匹配最合适的知识库或 Skill，例如产品 FAQ、API 文档或分析型 Skill。',
+        },
+        {
+          title: '路由策略',
+          description: '根据准确率优先或响应速度优先等策略，输出最合适的处理路径。',
+        },
+      ],
+      scenarios: ['智能客服', '企业知识库', '多技能协作'],
+      promptLogic: '系统分析用户问题的意图、关键词和领域，匹配知识库/技能库中的最优解，并输出可执行的路由路径。',
+      examples: [
+        {title: '路由问题（「如何重置密码？」）', content: '判断「如何重置密码？」的路由目标（如「用户手册-密码管理」「客服流程」）。'},
+        {title: '路由问题（「Python API调用超时怎么办？」）', content: '分析「Python API调用超时怎么办？」的路由策略（技术文档/技术支持Skill）。'},
+      ],
+    },
+    versions: [
+      {version: 'V1.0.0', date: '2026-06-14', notes: ['新增问题分类、知识源匹配和路由策略', '支持多知识源问答分发']},
+    ],
+  },
+  {
+    id: 'skill-001',
+    name: '方案深度追问',
+    description: '对用户方案进行持续、深入的追问式访谈，直到双方对关键决策达成一致理解。',
+    icon: '🧩',
+    status: '已发布',
+    tags: ['沟通', '产品'],
+    creatorId: CURRENT_SKILL_USER.id,
+    creatorName: CURRENT_SKILL_USER.name,
+    creatorAvatar: CURRENT_SKILL_USER.avatar,
+    addCount: 719,
+    updatedAt: '2026-06-14 10:30',
+    latestVersion: 'V1.0.0',
+    addedByCurrentUser: false,
+    introduction: {
+      coreFeatures: [
+        {
+          title: '方案压力测试',
+          description: '从目标是否清晰、资源是否足够、风险是否可控和验收标准是否可衡量四个方向连续追问，帮助用户发现方案在落地前最容易被忽略的问题。',
+        },
+        {
+          title: '模糊点识别',
+          description: '自动定位方案中表达含糊、逻辑跳步、缺少数据支撑或责任边界不清的内容，并转化为可以被团队直接讨论的问题。',
+        },
+        {
+          title: '共识问题清单',
+          description: '将追问结果整理成按优先级排列的澄清清单，突出需要决策人确认的关键取舍，方便会议前快速对齐。',
+        },
+      ],
+      scenarios: ['方案压力测试', '设计评审质询', '项目决策会前准备'],
+      promptLogic:
+        '系统会先识别方案中的目标、角色、约束和关键假设，再按照影响范围和不确定性排序追问。输出时优先给出最值得讨论的问题，并要求回答者补充证据或取舍依据。',
+      examples: [
+        {title: '测试营销方案', content: '对我制定的新产品营销方案进行压力测试。'},
+        {title: '质询建筑设计', content: '请对我设计的商业建筑方案进行严格质询。'},
+        {title: '厘清项目决策', content: '帮我厘清这个项目方案的关键决策。'},
+      ],
+    },
+    versions: [
+      {version: 'V1.0.0', date: '2026-06-14', notes: ['新增方案假设识别', '优化追问优先级排序', '补充项目决策类示例']},
+      {version: 'V0.9.0', date: '2026-06-08', notes: ['支持按目标、风险、资源三类维度输出问题', '修复长方案摘要不稳定问题']},
+      {version: 'V0.5.0', date: '2026-05-28', notes: ['完成首版追问链路', '加入基础结构化输出格式']},
+    ],
+  },
+  {
+    id: 'skill-002',
+    name: '制度问答助手',
+    description: '基于企业制度知识库回答考勤、报销、审批流等员工高频问题。',
+    icon: '📘',
+    status: '已发布',
+    tags: ['制度', '问答'],
+    creatorId: CURRENT_SKILL_USER.id,
+    creatorName: CURRENT_SKILL_USER.name,
+    creatorAvatar: CURRENT_SKILL_USER.avatar,
+    addCount: 456,
+    updatedAt: '2026-06-13 17:12',
+    latestVersion: 'V1.2.0',
+    addedByCurrentUser: true,
+    introduction: {
+      coreFeatures: [
+        {
+          title: '制度原文问答',
+          description: '优先基于企业制度原文和知识库召回内容回答问题，避免脱离依据自行发挥，适合员工自助查询高频政策。',
+        },
+        {
+          title: '来源可追溯',
+          description: '答案会尽量给出对应制度、章节或条款来源，让用户可以回到原文复核结论，降低制度解释争议。',
+        },
+        {
+          title: '不确定兜底',
+          description: '当召回内容不足或制度存在冲突时，会明确提示无法确认，并建议转人工或联系制度负责人处理。',
+        },
+      ],
+      scenarios: ['员工自助问答', 'HR 制度宣导', '审批规则解释'],
+      promptLogic: '优先从召回内容中抽取直接依据，不允许编造制度条款；答案必须包含适用范围、结论和来源。',
+      examples: [
+        {title: '请假规则查询', content: '入职未满一年可以休几天年假？'},
+        {title: '报销范围确认', content: '客户拜访产生的交通费是否可以报销？'},
+      ],
+    },
+    versions: [
+      {version: 'V1.2.0', date: '2026-06-13', notes: ['新增引用来源展示', '优化无法确认时的兜底话术']},
+      {version: 'V1.0.0', date: '2026-06-01', notes: ['完成制度问答基础能力']},
+    ],
+  },
+  {
+    id: 'skill-003',
+    name: '产品 FAQ 生成',
+    description: '根据产品说明、用户反馈和历史问题生成可入库的 FAQ 草案。',
+    icon: '📝',
+    status: '草稿',
+    tags: ['产品', 'FAQ'],
+    creatorId: CURRENT_SKILL_USER.id,
+    creatorName: CURRENT_SKILL_USER.name,
+    creatorAvatar: CURRENT_SKILL_USER.avatar,
+    addCount: 0,
+    updatedAt: '2026-06-12 11:08',
+    latestVersion: 'V0.1.0',
+    addedByCurrentUser: false,
+    introduction: {
+      coreFeatures: [
+        {
+          title: '高频问题提炼',
+          description: '从产品说明、客服反馈和用户评价中识别重复出现的问题意图，合并相似问法，减少 FAQ 条目的重复建设。',
+        },
+        {
+          title: '标准问答生成',
+          description: '按照知识库入库格式生成问题、答案和适用条件，答案会尽量保持清晰、短句和可直接复用。',
+        },
+        {
+          title: '标签辅助归类',
+          description: '根据产品模块、用户场景和问题类型自动给出标签建议，方便后续检索、筛选和运营维护。',
+        },
+      ],
+      scenarios: ['产品上线前 FAQ 准备', '客服知识沉淀'],
+      promptLogic: '从用户反馈中提取问题意图，合并重复问题，并按产品模块生成问答条目。',
+      examples: [{title: '生成 FAQ', content: '根据这份产品说明生成 10 条 FAQ。'}],
+    },
+    versions: [
+      {version: 'V0.1.0', date: '2026-06-12', notes: ['创建草稿', '完成基础提示词']},
+    ],
+  },
+  {
+    id: 'skill-004',
+    name: '接口变更影响分析',
+    description: '识别 API 变更对调用方、字段兼容性和上下游流程的影响。',
+    icon: '🔌',
+    status: '已停用',
+    tags: ['API', '研发'],
+    creatorId: CURRENT_SKILL_USER.id,
+    creatorName: CURRENT_SKILL_USER.name,
+    creatorAvatar: CURRENT_SKILL_USER.avatar,
+    addCount: 143,
+    updatedAt: '2026-06-08 09:10',
+    latestVersion: 'V0.9.0',
+    addedByCurrentUser: false,
+    introduction: {
+      coreFeatures: [
+        {
+          title: '接口差异对比',
+          description: '对比新旧接口文档中的路径、请求参数、响应字段、状态码和鉴权方式，快速标出发生变化的部分。',
+        },
+        {
+          title: '兼容风险识别',
+          description: '根据字段删除、类型变化、必填规则变化和错误码调整识别潜在兼容性风险，帮助研发提前判断影响范围。',
+        },
+        {
+          title: '调用方检查清单',
+          description: '把分析结果整理成调用方需要确认的检查项，包括改造点、测试重点和上线前需要同步的系统。',
+        },
+      ],
+      scenarios: ['API 评审', '上线风险排查'],
+      promptLogic: '按字段、状态码、鉴权方式和调用链四类差异检查风险，并输出修复建议。',
+      examples: [{title: '分析接口变更', content: '这份接口文档和上一版相比有哪些风险？'}],
+    },
+    versions: [
+      {version: 'V0.9.0', date: '2026-06-08', notes: ['停用旧版工具调用链', '等待新版接口文档适配']},
+    ],
+  },
+];
+
+export const INITIAL_SKILL_EXECUTION_RECORDS: SkillExecutionRecord[] = [
+  {
+    id: 'exec-001',
+    skillId: 'skill-105',
+    skillName: '过期检测',
+    userId: CURRENT_SKILL_USER.id,
+    userName: CURRENT_SKILL_USER.name,
+    triggerSource: '文档入库',
+    targetObject: '《贷后管理办法》',
+    owner: '系统',
+    input: '文档片段：本办法自2023年起执行，贷后巡检周期、风险预警规则和责任人配置按旧版流程处理。',
+    output: '发现3处可能过期内容：执行年份、巡检周期、风险预警规则需要复核。',
+    status: 'success',
+    durationSeconds: 8.2,
+    executedAt: timeText(2 * 60 * 60 * 1000),
+    feedback: {
+      value: 'useful',
+      submittedAt: timeText(90 * 60 * 1000),
+      submittedBy: CURRENT_SKILL_USER.id,
+    },
+  },
+  {
+    id: 'exec-002',
+    skillId: 'skill-101',
+    skillName: '知识摘要',
+    userId: CURRENT_SKILL_USER.id,
+    userName: CURRENT_SKILL_USER.name,
+    triggerSource: '文档入库',
+    targetObject: '《AI行业洞察报告》',
+    owner: '系统',
+    input: '文档片段：报告包含技术突破、产业应用、资本变化和政策影响四个章节。',
+    output: '已生成结构化摘要：技术突破加速、产业应用扩展、监管政策趋严。',
+    status: 'success',
+    durationSeconds: 3.6,
+    executedAt: timeText(26 * 60 * 60 * 1000),
+  },
+  {
+    id: 'exec-003',
+    skillId: 'skill-104',
+    skillName: '冲突检测',
+    userId: 'u-employee-002',
+    userName: '李明',
+    triggerSource: '内容审核',
+    targetObject: '2025营销方案 vs 2024营销复盘',
+    owner: '李明',
+    input: '对比两份营销文档中关于渠道预算、增长目标和投放周期的描述。',
+    output: '发现2处数据冲突：投放预算口径不一致、增长目标基准年份不同。',
+    status: 'success',
+    durationSeconds: 6.4,
+    executedAt: timeText(3 * 24 * 60 * 60 * 1000),
+    feedback: {
+      value: 'useless',
+      comment: '答案还需要明确额度上限。',
+      submittedAt: timeText(3 * 24 * 60 * 60 * 1000 - 30 * 60 * 1000),
+      submittedBy: 'u-employee-002',
+    },
+  },
+  {
+    id: 'exec-004',
+    skillId: 'skill-106',
+    skillName: '问答路由',
+    userId: CURRENT_SKILL_USER.id,
+    userName: CURRENT_SKILL_USER.name,
+    triggerSource: '用户提问',
+    targetObject: 'Python API调用超时怎么办？',
+    owner: CURRENT_SKILL_USER.name,
+    input: 'Python API调用超时怎么办？请判断应该路由到哪个知识源或 Skill。',
+    output: '',
+    status: 'failed',
+    durationSeconds: 1.1,
+    executedAt: timeText(5 * 24 * 60 * 60 * 1000),
+    errorMessage: '路由策略配置缺失，无法完成匹配。',
+  },
+  {
+    id: 'exec-005',
+    skillId: 'skill-102',
+    skillName: '元数据标注',
+    userId: CURRENT_SKILL_USER.id,
+    userName: CURRENT_SKILL_USER.name,
+    triggerSource: '文档入库',
+    targetObject: 'PRD_20250610',
+    owner: '系统',
+    input: '为PRD_20250610标注元数据：主题、目标用户、功能模块、优先级。',
+    output: '已标注主题、目标用户、核心功能模块和优先级，并推荐5个检索关键词。',
+    status: 'success',
+    durationSeconds: 2.8,
+    executedAt: timeText(12 * 24 * 60 * 60 * 1000),
+  },
+];
